@@ -1,0 +1,23 @@
+[project]
+name = "langchain-tutorial"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "rkeuni0i", email = "rkdms1090@naver.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents",
+    "langchain>=1.4.6",
+    "langchain-google-genai>=4.4.2",
+    "langchain-ollama>=1.1.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+langchain-tutorial = "langchain_tutorial:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14.0"]
+build-backend = "uv_build"

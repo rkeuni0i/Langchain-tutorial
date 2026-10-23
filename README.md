@@ -6,7 +6,8 @@ LangChain 및 LangGraph 기초 튜토리얼 프로젝트입니다.
 
 ### 1. Google Gemini (Vertex AI / GenAI) 버전
 - **`first_ex1.py`**: Gemini 모델 및 도구(날씨, 현재 시각)를 사용하는 기본 에이전트 (API 키 방식)
-- **`first_ex1_adc.py`**: API 키 없이 GCP ADC(`gcloud auth`) 인증으로 구동하는 Gemini 에이전트
+- **`first_ex1_adc.py`**: API 키 없이 GCP ADC(`gcloud auth`) 인증으로 구동하는 Gemini 에이전트 (실시간 날씨 & 미세먼지)
+- **`weather_structured_agent.py`**: Google Search Grounding 및 ADC 기반 실시간 기상 정보 구조화 에이전트
 - **`third_ex.py`**: 웹페이지 텍스트 파싱 도구 및 딥 에이전트(`deepagents`) 실습
 - **`fourth.py`**: 뉴스 기사 분석 및 Pydantic 기반 구조화된 출력(Structured Output) 에이전트
 - **`fifth.py`**: `InMemorySaver`를 활용한 멀티턴 대화 세션 기억 및 세션 격리 테스트
@@ -16,6 +17,12 @@ LangChain 및 LangGraph 기초 튜토리얼 프로젝트입니다.
 - **`third_ollama.py`**: Ollama 기반 웹 텍스트 파싱 및 딥 에이전트 실습
 - **`fourth_ollama.py`**: Ollama 기반 뉴스 기사 구조화된 출력 에이전트
 - **`fifth_ollama.py`**: Ollama 기반 `InMemorySaver` 대화 메모리 및 세션 격리 테스트
+
+### 3. 웹 챗봇 서비스 (Streamlit)
+- **`app.py`**: Gemini(ADC) & Ollama 하이브리드 웹 챗봇 (`InMemorySaver` 대화 기억 + 실시간 토큰/비용 카운터 탑재)
+  ```powershell
+  uv run streamlit run app.py
+  ```
 
 ---
 

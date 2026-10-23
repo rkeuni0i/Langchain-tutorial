@@ -34,10 +34,10 @@ model = ChatGoogleGenerativeAI(
     credentials=credentials,
     project=PROJECT_ID,
     location=LOCATION,
-    reasoning_effort="low",
-    streaming=True,
-    timeout=120,
-    max_retries=0,
+    reasoning_effort="low", #추론 수준 설정, low면 응답 빠름
+    streaming=True, #답변 바로바로 스트리밍으로 받기
+    timeout=120, #요청 제한 시간 (초)
+    max_retries=0, #몇 번 재시도할지 설정 (0이면 재시도 없음)
 )
 
 # ------------------------------------------------------------------

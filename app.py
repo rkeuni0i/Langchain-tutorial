@@ -1,6 +1,6 @@
 """
 LangChain + GCP Vertex AI (ADC 인증) & 로컬 Ollama(gemma4:e2b) 하이브리드 웹 챗봇
-(토큰 및 비용 카운터 포함)
+(구글 실시간 검색 ON/OFF 토글 및 토큰/비용 카운터 포함)
 실행 방법: uv run streamlit run app.py
 """
 
@@ -19,8 +19,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 # ==============================================================================
 
 @st.cache_resource
-def get_vertex_model():
-    """GCP ADC 인증을 거친 Vertex AI Gemini 모델 인스턴스를 반환합니다."""
+def get_vertex_model(enable_google_search: bool = False):
+    """
+    GCP ADC 인증을 거친 Vertex AI Gemini 모델 인스턴스를 반환합니다.
+    - enable_google_search: True일 경우 제미나이의 실시간 구글 검색(Google Search Grounding) 활성화
+    """
     credentials, default_project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
@@ -34,12 +37,16 @@ def get_vertex_model():
     location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     model_id = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+    # 구글 검색(Google Search Grounding) 활성화 여부에 따른 model_kwargs 설정
+    model_kwargs = {"tools": [{"google_search": {}}]} if enable_google_search else {}
+
     model = ChatGoogleGenerativeAI(
         model=model_id,
         vertexai=True,
         credentials=credentials,
         project=project_id,
         location=location,
+        model_kwargs=model_kwargs,
         streaming=False,
         timeout=120,
         max_retries=3,
@@ -132,7 +139,7 @@ def calculate_token_usage_and_cost(response_messages, model_choice: str):
 def main():
     st.set_page_config(page_title="AI 챗봇 (Gemini & Ollama)", page_icon="💬", layout="wide")
     st.title("💬 AI 하이브리드 챗봇")
-    st.caption("Google Gemini (Vertex AI ADC) & 로컬 Ollama (gemma4:e2b) 선택 지원")
+    st.caption("Google Gemini (Vertex AI ADC) & 로컬 Ollama | 🌐 실시간 구글 검색 지원")
 
     # 세션 상태 및 InMemorySaver 초기화
     if "memory" not in st.session_state:
@@ -143,7 +150,7 @@ def main():
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = [
-            {"role": "assistant", "content": "안녕하세요! 무엇이든 물어보세요. 대화창 하단에서 실시간 토큰 사용량과 예상 비용을 확인할 수 있습니다."}
+            {"role": "assistant", "content": "안녕하세요! 무엇이든 물어보세요. 사이드바에서 구글 검색 기능과 모델을 자유롭게 설정할 수 있습니다."}
         ]
 
     # 토큰 및 비용 통계 세션 상태
@@ -157,7 +164,7 @@ def main():
             "total_cost_usd": 0.0,
         }
 
-    # 사이드바: 모델 선택 및 InMemorySaver 모니터링
+    # 사이드바: 모델 설정 및 구글 검색 ON/OFF
     with st.sidebar:
         st.header("⚙️ 모델 설정")
         model_choice = st.radio(
@@ -169,24 +176,52 @@ def main():
 
         st.divider()
 
-        # 선택된 모델 로드
-        system_prompt = (
-            "당신은 친절하고 전문적인 AI 챗봇 어시스턴트입니다. "
-            "사용자의 이전 대화 맥락을 잘 기억하여 자연스럽고 도움이 되는 한국어로 답변하세요."
+        # ======================================================================
+        # [신규 기능] 구글 검색(Google Search Grounding) ON/OFF 토글
+        # ======================================================================
+        st.subheader("🌐 구글 검색 기능")
+        enable_search = st.toggle(
+            "구글 실시간 검색 활성화",
+            value=False,
+            help="최신 뉴스, 날씨, 실시간 정보가 필요할 때 켭니다. (Google Gemini 지원)",
         )
 
+        if enable_search:
+            if "Gemini" in model_choice:
+                st.caption("🟢 **구글 검색 ON**: 최신 웹 정보를 실시간 검색하여 답변합니다.")
+            else:
+                st.caption("⚠️ **알림**: 구글 검색 그라운딩은 Google Gemini 모델에서 지원됩니다. 상단에서 Gemini를 선택하시면 구글 검색이 적용됩니다.")
+        else:
+            st.caption("⚪ **구글 검색 OFF**: 모델의 자체 학습 지식만으로 답변합니다.")
+
+        st.divider()
+
+        # 선택된 설정에 따른 모델 로드
         try:
             if "Gemini" in model_choice:
-                model, project_id, location, model_id = get_vertex_model()
+                model, project_id, location, model_id = get_vertex_model(enable_google_search=enable_search)
                 st.write(f"**활성 모델:** `Gemini ({model_id})`")
                 st.write(f"**GCP 프로젝트:** `{project_id}`")
                 st.write(f"**리전:** `{location}`")
-                st.write(f"**인증 방식:** `GCP ADC (무키)`")
+                st.write(f"**검색 연동:** `{'ON (실시간 검색)' if enable_search else 'OFF'}`")
             else:
                 model = get_ollama_model()
                 st.write(f"**활성 모델:** `Ollama (gemma4:e2b)`")
                 st.write(f"**엔드포인트:** `http://localhost:11434`")
                 st.write(f"**실행 환경:** `로컬 GPU`")
+
+            # 시스템 프롬프트 설정 (검색 활성화 여부에 따라 맞춤 안내)
+            if enable_search and "Gemini" in model_choice:
+                system_prompt = (
+                    "당신은 친절하고 전문적인 AI 챗봇 어시스턴트입니다. "
+                    "구글 검색 기능을 활용하여 최신 정보나 실시간 데이터(뉴스, 날씨, 시세 등)를 직접 검색하여 "
+                    "정확하고 신뢰할 수 있는 정보를 한국어로 답변하세요. 사용자의 이전 대화 맥락도 잘 기억하세요."
+                )
+            else:
+                system_prompt = (
+                    "당신은 친절하고 전문적인 AI 챗봇 어시스턴트입니다. "
+                    "사용자의 이전 대화 맥락을 잘 기억하여 자연스럽고 도움이 되는 한국어로 답변하세요."
+                )
 
             # 선택된 모델과 세션 메모리로 에이전트 생성
             agent = create_agent(
@@ -275,7 +310,8 @@ def main():
 
         with st.chat_message("assistant"):
             active_model_label = "Gemini" if "Gemini" in model_choice else "Ollama (gemma4:e2b)"
-            with st.spinner(f"[{active_model_label}] 답변 생성 중..."):
+            search_badge = " + 🌐구글 검색" if (enable_search and "Gemini" in model_choice) else ""
+            with st.spinner(f"[{active_model_label}{search_badge}] 답변 생성 중..."):
                 try:
                     config = {"configurable": {"thread_id": st.session_state.thread_id}}
                     response = agent.invoke(

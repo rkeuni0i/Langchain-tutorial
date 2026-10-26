@@ -18,11 +18,16 @@ LangChain 및 LangGraph 기초 튜토리얼 프로젝트입니다.
 - **`fourth_ollama.py`**: Ollama 기반 뉴스 기사 구조화된 출력 에이전트
 - **`fifth_ollama.py`**: Ollama 기반 `InMemorySaver` 대화 메모리 및 세션 격리 테스트
 
-### 3. 웹 챗봇 서비스 (Streamlit)
-- **`app.py`**: Gemini(ADC) & Ollama 하이브리드 웹 챗봇 (`InMemorySaver` 대화 기억 + 실시간 토큰/비용 카운터 탑재)
+### 3. 웹 챗봇 서비스 (FastAPI)
+- **`app.py`**: Gemini(ADC) & Ollama 하이브리드 웹 챗봇 (`InMemorySaver` 대화 기억 + 구글 실시간 검색 ON/OFF + 실시간 토큰/비용 카운터 탑재)
   ```powershell
-  uv run streamlit run app.py
+  # 일반 python 명령어로 바로 실행 (브라우저: http://127.0.0.1:8000)
+  uv run python app.py
+  # 또는
+  python app.py
   ```
+  - 검색 모드(사이드바에서 선택): **OFF** / **Vertex AI Grounding with Google Search**(Gemini 전용) / **Custom Search**(`google_cse_search` 도구)
+  - Custom Search 사용 시 `.env`에 `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_ID`(Programmable Search Engine의 cx) 설정 필요
 
 ---
 

@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "deepagents",
     "fastapi>=0.162.0",
     "langchain>=1.4.6",

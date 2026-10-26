@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>💬 AI 하이브리드 챗봇 (FastAPI)</title>
+  <title>💬 AI 하이브리드 챗봇 (Google AI Studio 스타일)</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
 
-  <!-- 사이드바 -->
-  <aside>
+  <!-- [1] 좌측 사이드바: 대화 목록 & 세션 관리 -->
+  <aside class="sidebar-left">
     <div class="brand">💬 AI 하이브리드</div>
 
     <button class="btn-new-chat" onclick="resetChat()">
@@ -18,7 +18,7 @@
 
     <div class="sessions-section">
       <div class="sessions-header">
-        <div class="section-title" style="margin-bottom:0;">🕒 이전 대화 목록</div>
+        <div class="section-title">🕒 이전 대화 목록</div>
         <button class="btn-refresh" onclick="loadSessionsList()" title="목록 새로고침">🔄 새로고침</button>
       </div>
       <div class="sessions-container" id="sessionsList">
@@ -27,66 +27,33 @@
     </div>
 
     <div>
-      <div class="section-title">⚙️ 모델 선택</div>
-      <div class="option-group">
-        <label class="radio-label">
-          <input type="radio" name="model" value="gemini" checked onchange="updateModelUI()">
-          <span>Google Gemini (Vertex AI ADC)</span>
-        </label>
-        <label class="radio-label">
-          <input type="radio" name="model" value="ollama" onchange="updateModelUI()">
-          <span>로컬 Ollama (gemma4:e2b)</span>
-        </label>
-      </div>
-    </div>
-
-    <div>
-      <div class="section-title">🌐 구글 검색 연동</div>
-      <div class="option-group">
-        <label class="radio-label">
-          <input type="radio" name="searchMode" value="off" checked onchange="updateModelUI()">
-          <span>검색 OFF</span>
-        </label>
-        <label class="radio-label">
-          <input type="radio" name="searchMode" value="grounding" onchange="updateModelUI()">
-          <span>Vertex AI Grounding with Google Search</span>
-        </label>
-        <label class="radio-label">
-          <input type="radio" name="searchMode" value="cse" onchange="updateModelUI()">
-          <span>Custom Search (google_cse_search)</span>
-        </label>
-      </div>
-      <div class="search-hint" id="searchHint">
-        ⚪ <b>검색 OFF</b>: 모델 자체 지식으로 답변합니다.
-      </div>
-    </div>
-
-    <div>
-      <div class="section-title">ℹ️ 시스템 정보</div>
+      <div class="section-title" style="margin-bottom:6px;">ℹ️ 시스템 정보</div>
       <div class="info-card">
         <div><b>저장소:</b> <span id="infoStorage">확인 중...</span></div>
         <div><b>프로젝트:</b> <span id="infoProject">iceu-songpa04</span></div>
         <div><b>리전:</b> <span id="infoLocation">us-central1</span></div>
         <div><b>세션 ID:</b> <code id="infoThread">-</code></div>
-        <div><b>저장된 대화:</b> <span id="infoMsgCount">0개 메시지</span> <a id="linkHistory" href="#" target="_blank" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">[JSON 보기]</a></div>
+        <div><b>저장된 대화:</b> <span id="infoMsgCount">0개 메시지</span> <a id="linkHistory" href="#" target="_blank" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">[JSON]</a></div>
       </div>
     </div>
-
-    <button class="btn-reset" onclick="resetChat()">
-      🗑️ 대화 초기화 (새 세션)
-    </button>
   </aside>
 
-  <!-- 메인 채팅창 -->
+  <!-- [2] 중앙 메인 채팅창 -->
   <main>
     <header>
       <div>
         <h2 style="font-size:1.15rem; font-weight:700;">💬 AI 하이브리드 챗봇</h2>
-        <span style="font-size:0.8rem; color:var(--text-muted);">FastAPI Backend & LangChain PostgresSaver</span>
+        <span style="font-size:0.8rem; color:var(--text-muted);">Vertex AI Gemini 2.5 Flash & 로컬 Ollama</span>
       </div>
       <div class="header-badges">
         <span class="badge" id="badgeModel">Gemini 2.5 Flash</span>
-        <span class="badge" id="badgeSearch">검색 OFF</span>
+        <span class="badge search-on" id="badgeSearch">🌐 Grounding</span>
+        <span class="badge token-limit-badge" id="badgeMaxTokens">Max 2,048T</span>
+        <span class="badge" id="badgeStructured" style="display:none; background:#ede9fe; color:#6d28d9;">📋 구조화된 출력</span>
+        <span class="badge" id="badgeCodeExecution" style="display:none; background:#ecfdf5; color:#047857;">⚡ Code Exec</span>
+        <button class="btn-toggle-run-settings" onclick="toggleRightPanel()" title="Run settings 열기/닫기">
+          ⚙️ Run settings
+        </button>
       </div>
     </header>
 
@@ -94,7 +61,7 @@
       <!-- 봇 환영 메시지 -->
       <div class="msg-row bot">
         <div class="avatar bot">🤖</div>
-        <div class="bubble">안녕하세요! 무엇이든 물어보세요. 사이드바에서 구글 실시간 검색과 모델을 변경할 수 있습니다.</div>
+        <div class="bubble">안녕하세요! 무엇이든 물어보세요. 우측의 <b>Run settings</b> 메뉴에서 출력 토큰 수 제한, 모델, 실시간 구글 검색 기능을 조절할 수 있습니다.</div>
       </div>
     </div>
 
@@ -119,15 +86,282 @@
         </div>
       </div>
 
-      <div class="input-bar">
-        <input type="text" id="userInput" placeholder="메시지를 입력하세요... (Enter 키로 전송)" onkeydown="if(event.key==='Enter') sendMessage()">
-        <button class="btn-send" id="btnSend" onclick="sendMessage()">전송</button>
+      <!-- 하단 모던 프롬프트 입력창 (Gemini 스타일 + 모델/추론선택 팝업) -->
+      <div class="prompt-input-container">
+        <!-- 새 대화(+) 버튼 -->
+        <button type="button" class="btn-prompt-plus" onclick="resetChat()" title="새로운 대화 시작">
+          +
+        </button>
+
+        <span class="prompt-shield-icon">🛡️</span>
+
+        <!-- 사용자 프롬프트 입력창 -->
+        <input type="text" id="userInput" class="prompt-text-input" placeholder="Gemini에게 물어보기... (Enter 키로 전송)" onkeydown="if(event.key==='Enter') sendMessage()">
+
+        <!-- 모델 / 추론 모드(Reasoning Effort) 선택 캡슐 버튼 & 팝업 메뉴 (사용자 첨부 사진 스타일) -->
+        <div class="model-picker-container" id="modelPickerContainer">
+          <button type="button" class="btn-model-capsule" id="btnModelCapsule" onclick="toggleModelDropdown(event)" title="모델 및 추론 수준(Reasoning effort) 변경">
+            <span id="modelCapsuleLabel">Flash</span>
+            <span class="capsule-caret" id="capsuleCaret">▾</span>
+          </button>
+
+          <!-- 플로팅 팝업 메뉴 -->
+          <div class="model-popup-menu" id="modelPopupMenu" style="display: none;">
+            <div class="popup-option-item active" id="popOpt_flash" onclick="selectModelEffort('gemini', 'medium', 'Flash')">
+              <span class="pop-check">✓</span>
+              <div class="pop-info">
+                <div class="pop-title">2.5 Flash</div>
+                <div class="pop-desc">무엇이든 도움을 받으세요 (기본)</div>
+              </div>
+            </div>
+
+            <div class="popup-option-item" id="popOpt_thinking" onclick="selectModelEffort('gemini', 'high', '사고 모델')">
+              <span class="pop-check">✓</span>
+              <div class="pop-info">
+                <div class="pop-title">2.5 사고 모델 (Thinking)</div>
+                <div class="pop-desc">복잡한 문제 해결 (reasoning_effort: High)</div>
+              </div>
+            </div>
+
+            <div class="popup-option-item" id="popOpt_fast" onclick="selectModelEffort('gemini', 'low', '빠른 추론')">
+              <span class="pop-check">✓</span>
+              <div class="pop-info">
+                <div class="pop-title">2.5 빠른 추론 (Fast)</div>
+                <div class="pop-desc">간결하고 신속한 응답 (reasoning_effort: Low)</div>
+              </div>
+            </div>
+
+            <div class="popup-divider"></div>
+
+            <div class="popup-option-item" id="popOpt_ollama" onclick="selectModelEffort('ollama', 'medium', 'Ollama')">
+              <span class="pop-check">✓</span>
+              <div class="pop-info">
+                <div class="pop-title">로컬 Ollama</div>
+                <div class="pop-desc">gemma4:e2b 온디바이스 무료 실행</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 전송 버튼 -->
+        <button class="btn-send-round" id="btnSend" onclick="sendMessage()" title="전송">
+          ➤
+        </button>
       </div>
     </footer>
   </main>
+
+  <!-- [3] 우측 사이드바: Google AI Studio 스타일 Run settings (출력 토큰 제한 포함) -->
+  <aside class="sidebar-right" id="rightPanel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <span>⚙️ Run settings</span>
+      </div>
+      <div class="panel-header-actions">
+        <button class="btn-panel-action" onclick="toggleRightPanel()" title="패널 닫기">✕</button>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      <!-- 모델 선택 -->
+      <div class="setting-card">
+        <div class="setting-card-title">Model</div>
+        <div class="option-group">
+          <label class="radio-label">
+            <input type="radio" name="model" value="gemini" checked onchange="updateModelUI()">
+            <span>Google Gemini 2.5 Flash</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="model" value="ollama" onchange="updateModelUI()">
+            <span>로컬 Ollama (gemma4:e2b)</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Thinking level / Reasoning effort -->
+      <div class="setting-row">
+        <div class="setting-label-group">
+          <span class="setting-label">Thinking level (Reasoning effort)</span>
+          <span class="setting-subtext">추론 및 사고 수준 조절</span>
+        </div>
+        <select class="select-input" id="thinkingLevel" onchange="updateThinkingLevel()">
+          <option value="low">Low (가벼운 추론 - budget 1,024)</option>
+          <option value="medium" selected>Medium (기본 - budget 2,048)</option>
+          <option value="high">High (심층 사고 모델 - budget 8,192)</option>
+        </select>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Tools (구글 검색 연동) -->
+      <div class="collapsible-section">
+        <div class="collapsible-header" onclick="toggleSection('toolsContent', 'toolsCaret')">
+          <span>🛠️ Tools</span>
+          <span class="caret" id="toolsCaret">▾</span>
+        </div>
+        <div class="collapsible-content" id="toolsContent">
+          <!-- Structured Outputs (구조화된 출력 - 원샷 예시 포맷팅) -->
+          <div class="tool-row structured-tool-row">
+            <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+              <div class="tool-info">
+                <span class="tool-name">📋 Structured outputs (구조화된 출력)</span>
+                <span class="tool-source">원샷(One-Shot) 예시 포맷으로 정형화된 텍스트/데이터 생성</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button type="button" class="btn-config-toggle" id="btnToggleStructuredConfig" onclick="toggleStructuredConfig()" title="원샷 포맷 설정 열기/닫기">설정 ▾</button>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="toggleStructuredOutput" onchange="onStructuredToggle()">
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
+
+            <!-- One-Shot 예시 포맷 설정 영역 (토글 켜지거나 설정 버튼 클릭 시 표시) -->
+            <div class="structured-config-area" id="structuredConfigArea" style="display: none;">
+              <div class="structured-header">
+                <span class="structured-title">✨ 원샷 템플릿:</span>
+                <select class="select-input-sm" id="presetSelect" onchange="applyStructuredPreset()">
+                  <option value="news" selected>📰 뉴스 기사 요약 (뉴스 제목 / 기자 / 요약)</option>
+                  <option value="summary_text">📋 일반 텍스트 요약 (주제 / 포인트 / 결론)</option>
+                  <option value="qa">❓ Q&A 문답 양식</option>
+                  <option value="json_summary">💻 JSON 포맷 (객체 형식)</option>
+                  <option value="custom">✍️ 직접 작성 (Custom)</option>
+                </select>
+              </div>
+
+              <!-- 원샷 예시 입력 (선택) -->
+              <div class="structured-field">
+                <label class="field-label">예시 입력/질문 (Example Input - 선택):</label>
+                <input type="text" id="oneShotInput" class="text-input-sm" placeholder="예: 링크 페이지 : https://..." value="링크 페이지 : https://www.hani.co.kr/arti/international/international_general/1284117.html">
+              </div>
+
+              <!-- 원샷 예시 출력 포맷 (필수) -->
+              <div class="structured-field">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                  <label class="field-label">예시 출력 포맷 (Example Output Format):</label>
+                  <button type="button" class="btn-format-json" onclick="resetOneShotFormat()" title="선택된 템플릿 기본값 복원">예시 복원</button>
+                </div>
+                <textarea id="oneShotOutput" class="textarea-sm" rows="6" spellcheck="false">뉴스 제목 : 
+기자 이름 : 
+뉴스 내용 요약 : </textarea>
+              </div>
+
+              <div class="structured-hint">
+                💡 AI가 위의 원샷 예시 포맷(라벨, 서식, 줄바꿈)을 엄격히 학습하여 동일한 텍스트 구조로 답변합니다.
+              </div>
+            </div>
+          </div>
+
+          <!-- Code Execution (파이썬 코드 실행) -->
+          <div class="tool-row">
+            <div class="tool-info">
+              <span class="tool-name">⚡ Code execution (파이썬 코드 실행)</span>
+              <span class="tool-source">AI가 코드를 직접 작성 및 실행하여 결과 확인</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggleCodeExecution" onchange="onCodeExecutionToggle()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Grounding with Google Search -->
+          <div class="tool-row">
+            <div class="tool-info">
+              <span class="tool-name">🌐 Grounding with Google Search</span>
+              <span class="tool-source">Source: Google Search (실시간 검색)</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggleGrounding" checked onchange="onSearchToggle('grounding')">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- Programmable Custom Search -->
+          <div class="tool-row">
+            <div class="tool-info">
+              <span class="tool-name">🔎 Custom Search JSON API</span>
+              <span class="tool-source">Source: Programmable Search Engine</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggleCSE" onchange="onSearchToggle('cse')">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!-- LangGraph Store 검색 캐시 모니터 카드 -->
+          <div class="cache-monitor-card">
+            <div class="cache-monitor-header">
+              <span class="cache-monitor-title">⚡ LangGraph Store 검색 캐시</span>
+              <span class="cache-status-badge">활성화 🟢</span>
+            </div>
+            <div class="cache-stats-row">
+              <div>적중(HIT): <b id="cacheHitCount" style="color:#059669;">0</b>회</div>
+              <div>미스(MISS): <b id="cacheMissCount" style="color:#64748b;">0</b>회</div>
+              <div>보관: <b id="cachedItemCount">0</b>개</div>
+            </div>
+            <div class="cache-subtext">
+              ⏱️ 유효기간(TTL): 30분 | 동일 검색어 시 API 호출 없이 0.01초 내 복원
+            </div>
+            <button type="button" class="btn-clear-cache" onclick="clearSearchCache()">
+              🧹 캐시 비우기
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Advanced settings (맨 아래에 Output length 배치!) -->
+      <div class="collapsible-section">
+        <div class="collapsible-header" onclick="toggleSection('advancedContent', 'advancedCaret')">
+          <span>⚙️ Advanced settings</span>
+          <span class="caret" id="advancedCaret">▾</span>
+        </div>
+        <div class="collapsible-content" id="advancedContent">
+          <!-- Temperature (온도) -->
+          <div class="slider-control-group">
+            <div class="slider-header">
+              <span class="setting-label">Temperature</span>
+              <input type="number" id="tempInput" class="num-box" min="0" max="2" step="0.1" value="0.7" oninput="syncTemp('input')">
+            </div>
+            <input type="range" id="tempSlider" class="range-slider" min="0" max="2" step="0.1" value="0.7" oninput="syncTemp('slider')">
+            <div class="slider-hints">
+              <span>0.0 (정확/일관)</span>
+              <span>1.0 (균형)</span>
+              <span>2.0 (창의적)</span>
+            </div>
+          </div>
+
+          <!-- ★ Output length (LLM 출력 토큰 수 제한 - Google AI Studio 오른쪽 맨 아래 기능!) ★ -->
+          <div class="slider-control-group token-limit-group">
+            <div class="slider-header">
+              <div class="setting-label-wrap">
+                <span class="setting-label bold-label">Output length</span>
+                <span class="token-badge" id="tokenBadge">2,048 토큰</span>
+              </div>
+              <input type="number" id="outputLengthInput" class="num-box token-input" min="64" max="8192" step="64" value="2048" oninput="syncOutputLength('input')">
+            </div>
+            <input type="range" id="outputLengthSlider" class="range-slider" min="64" max="8192" step="64" value="2048" oninput="syncOutputLength('slider')">
+            
+            <!-- 편리한 프리셋 버튼 -->
+            <div class="token-presets">
+              <button type="button" class="preset-btn" onclick="setTokenPreset(256)">256 (짧게)</button>
+              <button type="button" class="preset-btn" onclick="setTokenPreset(512)">512</button>
+              <button type="button" class="preset-btn" onclick="setTokenPreset(1024)">1,024</button>
+              <button type="button" class="preset-btn active" id="preset2048" onclick="setTokenPreset(2048)">2,048</button>
+              <button type="button" class="preset-btn" onclick="setTokenPreset(4096)">4,096</button>
+              <button type="button" class="preset-btn" onclick="setTokenPreset(8192)">8,192 (최대)</button>
+            </div>
+            <div class="token-hint">
+              🎯 <b>출력 토큰 제한</b>: 모델이 한 번의 답변에서 생성할 수 있는 최대 토큰 수를 제어합니다. 숫자를 작게 설정하면 답변이 간결해지고 불필요한 토큰 비용을 방지할 수 있습니다.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
 
   <!-- 프론트엔드 스크립트 -->
   <script src="/static/js/app.js"></script>
 </body>
 </html>
-

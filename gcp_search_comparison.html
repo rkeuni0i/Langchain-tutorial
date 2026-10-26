@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vertex AI Search vs Grounding with Google Search 비교</title>
+<style>
+  :root { --blue:#2563eb; --green:#059669; --bg:#f8fafc; --card:#fff; --line:#e2e8f0; --text:#0f172a; --muted:#64748b; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"Segoe UI","Noto Sans KR",sans-serif; background:var(--bg); color:var(--text); line-height:1.65; padding:32px 16px; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:1.7rem; margin-bottom:6px; }
+  .sub { color:var(--muted); margin-bottom:28px; }
+  h2 { font-size:1.2rem; margin:32px 0 12px; padding-left:10px; border-left:4px solid var(--blue); }
+  .cards { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; }
+  .card h3 { font-size:1.05rem; margin-bottom:8px; }
+  .card.a { border-top:4px solid var(--blue); }
+  .card.b { border-top:4px solid var(--green); }
+  .tag { display:inline-block; font-size:.75rem; font-weight:700; padding:2px 8px; border-radius:10px; margin-bottom:8px; }
+  .a .tag { background:#dbeafe; color:#1d4ed8; }
+  .b .tag { background:#d1fae5; color:#047857; }
+  ul { padding-left:18px; } li { margin:3px 0; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:.92rem; }
+  th, td { padding:11px 14px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+  th { background:#f1f5f9; font-size:.85rem; }
+  th.a { color:#1d4ed8; } th.b { color:#047857; }
+  td:first-child { font-weight:600; width:19%; background:#fafafa; }
+  tr:last-child td { border-bottom:none; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:4px; font-size:.85em; }
+  pre { background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:10px; overflow-x:auto; font-size:.84rem; margin-top:8px; }
+  .pick { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .note { background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:12px 16px; font-size:.88rem; margin-top:20px; }
+  .tip { background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px; padding:12px 16px; font-size:.9rem; margin-top:16px; }
+  @media (max-width:720px){ .cards,.pick{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔍 Vertex AI Search vs Grounding with Google Search</h1>
+  <p class="sub">GCP에서 Gemini에 "검색 기반 근거"를 붙이는 두 가지 방법 비교</p>
+
+  <h2>한 줄 요약</h2>
+  <div class="cards">
+    <div class="card a">
+      <span class="tag">내부/사설 데이터</span>
+      <h3>Vertex AI Search</h3>
+      <p>내 문서·웹사이트·DB를 <b>데이터 스토어에 색인</b>해 두고, 그 안에서 검색해 답하게 하는 <b>엔터프라이즈 RAG/검색 서비스</b>입니다.</p>
+    </div>
+    <div class="card b">
+      <span class="tag">공개 웹</span>
+      <h3>Grounding with Google Search</h3>
+      <p>Gemini 호출 시 <b>구글 검색 도구를 켜기만 하면</b> 모델이 필요할 때 직접 검색해 최신 웹 정보로 답하는 <b>내장 기능</b>입니다.</p>
+    </div>
+  </div>
+
+  <h2>상세 비교표</h2>
+  <table>
+    <tr><th>항목</th><th class="a">Vertex AI Search</th><th class="b">Grounding with Google Search</th></tr>
+    <tr><td>검색 대상</td><td>내가 연결한 데이터: Cloud Storage 문서(PDF 등), 웹사이트, BigQuery/구조화 데이터, 외부 커넥터 등</td><td>구글이 가진 공개 웹 전체</td></tr>
+    <tr><td>사전 준비</td><td>검색 앱(Engine)과 <b>데이터 스토어 생성 → 데이터 수집·색인</b>이 필요. 파싱·청킹 설정, 갱신 관리 포함</td><td><b>없음</b>. 요청에 <code>google_search</code> 도구만 추가</td></tr>
+    <tr><td>최신성</td><td>색인한 시점·동기화 주기에 의존</td><td>실시간에 가까운 웹 최신 정보</td></tr>
+    <tr><td>접근 제어</td><td>데이터 소스별 권한·보안 설정 가능(사내 문서에 적합)</td><td>해당 없음(공개 정보만)</td></tr>
+    <tr><td>검색 쿼리 생성</td><td>앱 설정과 검색 호출은 개발자가 제어</td><td>모델이 검색 필요 여부와 쿼리를 <b>스스로 판단</b></td></tr>
+    <tr><td>출처 표시</td><td>답변과 함께 원문 문서·청크 인용 제공</td><td><code>grounding_metadata</code>(검색 쿼리, 출처 링크, 문장별 근거) 제공. 검색 제안(Search Suggestions) 표시 요건 있음</td></tr>
+    <tr><td>비용 구조</td><td>쿼리 수 과금(Standard / Enterprise 등급별) + 색인 데이터 저장 용량 과금 + 무료 구간 있음</td><td>Gemini 2.5 이하: <b>grounded prompt</b> 단위 / Gemini 3 이상: <b>검색 쿼리</b> 단위 과금, 일일·월간 무료 한도 있음</td></tr>
+    <tr><td>구축 난이도</td><td>중~상 (데이터 파이프라인 필요)</td><td>하 (옵션 하나)</td></tr>
+    <tr><td>적합한 질문</td><td>"우리 회사 휴가 규정은?", "제품 매뉴얼의 설치 방법은?"</td><td>"오늘 문정동 날씨는?", "어제 경기 결과는?", "최신 뉴스 요약"</td></tr>
+  </table>
+
+  <h2>어떤 걸 선택할까?</h2>
+  <div class="pick">
+    <div class="card a">
+      <h3>✅ Vertex AI Search를 고르세요</h3>
+      <ul>
+        <li>사내 문서·정책·제품 매뉴얼 기반 Q&amp;A</li>
+        <li>권한별로 보여줄 문서를 통제해야 할 때</li>
+        <li>정확한 원문 인용과 도메인 한정 검색이 중요할 때</li>
+        <li>특정 사이트(내 도메인)만 검색 범위로 제한하고 싶을 때</li>
+      </ul>
+    </div>
+    <div class="card b">
+      <h3>✅ Grounding with Google Search를 고르세요</h3>
+      <ul>
+        <li>뉴스·날씨·시세 등 실시간 공개 정보가 필요할 때</li>
+        <li>인프라 구축 없이 빠르게 최신성 확보</li>
+        <li>일반 상식·세상 지식 보강 챗봇</li>
+        <li>프로토타입·튜토리얼</li>
+      </ul>
+    </div>
+  </div>
+  <div class="tip">💡 <b>둘을 함께 쓸 수도 있습니다.</b> 사내 지식은 Vertex AI Search, 외부 최신 정보는 Google Search Grounding으로 나누어 라우팅하는 구성이 흔합니다. 단, 모델·SDK 버전에 따라 한 요청에 여러 검색 도구를 동시에 쓰는 데 제약이 있을 수 있어, 모드를 분리해 선택하게 하는 방식이 안전합니다.</div>
+
+  <h2>코드 예시 (LangChain + ChatGoogleGenerativeAI)</h2>
+  <div class="cards">
+    <div class="card b">
+      <h3>Grounding with Google Search</h3>
+<pre>model = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash", vertexai=True)
+model = model.bind_tools(
+    [{"google_search": {}}])</pre>
+    </div>
+    <div class="card a">
+      <h3>Vertex AI Search (데이터 스토어 연결)</h3>
+<pre>datastore = ("projects/PROJ/locations/global/"
+  "collections/default_collection/"
+  "dataStores/DATASTORE_ID")
+model = model.bind_tools([{
+  "retrieval": {"vertex_ai_search":
+    {"datastore": datastore}}}])</pre>
+    </div>
+  </div>
+
+  <h2>이 프로젝트(<code>app.py</code>)와의 관계</h2>
+  <table>
+    <tr><th>모드</th><th>종류</th><th>비고</th></tr>
+    <tr><td>Vertex AI Grounding</td><td>Grounding with Google Search</td><td>이미 구현됨. Gemini 전용</td></tr>
+    <tr><td>Custom Search</td><td>Programmable Search Engine(Custom Search JSON API)</td><td>이미 구현됨. <code>google_cse_search</code> 도구, Ollama에서도 사용 가능</td></tr>
+    <tr><td>Vertex AI Search</td><td>사설 데이터 검색(RAG)</td><td>아직 미구현. 데이터 스토어를 만든 뒤 위 <code>retrieval</code> 도구로 추가 가능</td></tr>
+  </table>
+
+  <div class="note">⚠️ <b>가격·무료 한도·정책은 자주 바뀝니다.</b> 위 비용 항목은 구조와 대략적인 경향을 설명한 것이므로, 실제 도입 전에 GCP 공식 가격 페이지(Vertex AI Search, Gemini API/Vertex AI Grounding)에서 최신 금액을 확인하세요.</div>
+</div>
+</body>
+</html>
+

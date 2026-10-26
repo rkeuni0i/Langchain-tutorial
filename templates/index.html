@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>💬 AI 하이브리드 챗봇 (FastAPI)</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- 사이드바 -->
+  <aside>
+    <div class="brand">💬 AI 하이브리드</div>
+
+    <button class="btn-new-chat" onclick="resetChat()">
+      <span>➕ 새 대화 시작</span>
+    </button>
+
+    <div class="sessions-section">
+      <div class="sessions-header">
+        <div class="section-title" style="margin-bottom:0;">🕒 이전 대화 목록</div>
+        <button class="btn-refresh" onclick="loadSessionsList()" title="목록 새로고침">🔄 새로고침</button>
+      </div>
+      <div class="sessions-container" id="sessionsList">
+        <div class="sessions-empty">대화 목록을 불러오는 중...</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">⚙️ 모델 선택</div>
+      <div class="option-group">
+        <label class="radio-label">
+          <input type="radio" name="model" value="gemini" checked onchange="updateModelUI()">
+          <span>Google Gemini (Vertex AI ADC)</span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="model" value="ollama" onchange="updateModelUI()">
+          <span>로컬 Ollama (gemma4:e2b)</span>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">🌐 구글 검색 연동</div>
+      <div class="option-group">
+        <label class="radio-label">
+          <input type="radio" name="searchMode" value="off" checked onchange="updateModelUI()">
+          <span>검색 OFF</span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="searchMode" value="grounding" onchange="updateModelUI()">
+          <span>Vertex AI Grounding with Google Search</span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="searchMode" value="cse" onchange="updateModelUI()">
+          <span>Custom Search (google_cse_search)</span>
+        </label>
+      </div>
+      <div class="search-hint" id="searchHint">
+        ⚪ <b>검색 OFF</b>: 모델 자체 지식으로 답변합니다.
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">ℹ️ 시스템 정보</div>
+      <div class="info-card">
+        <div><b>저장소:</b> <span id="infoStorage">확인 중...</span></div>
+        <div><b>프로젝트:</b> <span id="infoProject">iceu-songpa04</span></div>
+        <div><b>리전:</b> <span id="infoLocation">us-central1</span></div>
+        <div><b>세션 ID:</b> <code id="infoThread">-</code></div>
+        <div><b>저장된 대화:</b> <span id="infoMsgCount">0개 메시지</span> <a id="linkHistory" href="#" target="_blank" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">[JSON 보기]</a></div>
+      </div>
+    </div>
+
+    <button class="btn-reset" onclick="resetChat()">
+      🗑️ 대화 초기화 (새 세션)
+    </button>
+  </aside>
+
+  <!-- 메인 채팅창 -->
+  <main>
+    <header>
+      <div>
+        <h2 style="font-size:1.15rem; font-weight:700;">💬 AI 하이브리드 챗봇</h2>
+        <span style="font-size:0.8rem; color:var(--text-muted);">FastAPI Backend & LangChain PostgresSaver</span>
+      </div>
+      <div class="header-badges">
+        <span class="badge" id="badgeModel">Gemini 2.5 Flash</span>
+        <span class="badge" id="badgeSearch">검색 OFF</span>
+      </div>
+    </header>
+
+    <div class="chat-box" id="chatBox">
+      <!-- 봇 환영 메시지 -->
+      <div class="msg-row bot">
+        <div class="avatar bot">🤖</div>
+        <div class="bubble">안녕하세요! 무엇이든 물어보세요. 사이드바에서 구글 실시간 검색과 모델을 변경할 수 있습니다.</div>
+      </div>
+    </div>
+
+    <!-- 하단 토큰/비용 대시보드 및 입력창 -->
+    <footer>
+      <div class="metrics-bar">
+        <div class="metric-card">
+          <div class="metric-label">📥 이번 턴 입력</div>
+          <div class="metric-val" id="metricLastInput">0 토큰</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">📤 이번 턴 출력</div>
+          <div class="metric-val" id="metricLastOutput">0 토큰</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">📊 세션 누적 토큰</div>
+          <div class="metric-val" id="metricTotalTokens">0 토큰</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">💰 누적 예상 비용</div>
+          <div class="metric-val" id="metricTotalCost">0.000원</div>
+        </div>
+      </div>
+
+      <div class="input-bar">
+        <input type="text" id="userInput" placeholder="메시지를 입력하세요... (Enter 키로 전송)" onkeydown="if(event.key==='Enter') sendMessage()">
+        <button class="btn-send" id="btnSend" onclick="sendMessage()">전송</button>
+      </div>
+    </footer>
+  </main>
+
+  <!-- 프론트엔드 스크립트 -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
+

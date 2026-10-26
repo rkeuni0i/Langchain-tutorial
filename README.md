@@ -28,6 +28,12 @@ LangChain 및 LangGraph 기초 튜토리얼 프로젝트입니다.
   ```
   - 검색 모드(사이드바에서 선택): **OFF** / **Vertex AI Grounding with Google Search**(Gemini 전용) / **Custom Search**(`google_cse_search` 도구)
   - Custom Search 사용 시 `.env`에 `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_ID`(Programmable Search Engine의 cx) 설정 필요
+  - 대화 세션은 **PostgreSQL**에 저장됩니다 (`PostgresSaver` 체크포인트 + `chat_sessions` 토큰/비용 테이블).
+    ```powershell
+    docker compose up -d   # 로컬 PostgreSQL 실행
+    # .env: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/chatbot
+    ```
+    `DATABASE_URL`이 없거나 연결에 실패하면 `InMemorySaver`로 대체 실행됩니다(재시작 시 대화 소실).
 
 ---
 

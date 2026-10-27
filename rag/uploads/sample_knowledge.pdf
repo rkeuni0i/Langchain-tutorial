@@ -1,0 +1,60 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1384 >>
+stream
+BT
+/F1 12 Tf
+40 750 Td
+18 TL
+(Artificial Intelligence and RAG Guide) '
+(Document Overview: RAG \(Retrieval-Augmented Generation\) Architecture) '
+() '
+(1. Concept of RAG:) '
+(Retrieval-Augmented Generation combines LLMs with external knowledge bases.) '
+(Instead of relying solely on parametric training weights, RAG retrieves) '
+(relevant context at runtime and supplies it to the model prompt.) '
+() '
+(2. Key Benefits of RAG:) '
+(- Hallucination Reduction: Grounding responses in verified documents.) '
+(- Fresh Information: Keeping knowledge updated without expensive retraining.) '
+(- Verifiable Sources: Enabling explicit citations and page references.) '
+(- Security & Access Control: Keeping sensitive data in private databases.) '
+() '
+(3. Document Chunking Strategies:) '
+(Chunk size determines the size of text segments sent to the embedding model.) '
+(A typical chunk size ranges between 400 and 1000 characters.) '
+(Chunk overlap \(usually 10 to 20 percent of chunk size\) ensures that important) '
+(information at boundaries is not lost between adjacent chunks.) '
+() '
+(4. Vector Database and Cosine Similarity:) '
+(Embeddings map text to high-dimensional vectors \(e.g., 3072 dimensions in Gemini\).) '
+(Cosine similarity measures the angular distance between query and document vectors.) '
+(A similarity score close to 1.0 represents high contextual relevance.) '
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001676 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1746
+%%EOF

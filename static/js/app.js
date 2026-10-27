@@ -463,6 +463,211 @@ function renderCodeExecutionsHtml(executions) {
 }
 
 // ==============================================================================
+// [1-4] Gemini 웹 스타일 날씨 그래픽 위젯 렌더링 & 인터랙션
+// ==============================================================================
+
+function getWeatherSvgIcon(iconKey, size = 32) {
+  const uid = "w_" + Math.random().toString(36).substring(2, 8);
+  if (iconKey === "sunny") {
+    return `
+      <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+        <defs>
+          <radialGradient id="sunGrad_${uid}" cx="35%" cy="30%" r="70%">
+            <stop offset="0%" stop-color="#FFE066"/>
+            <stop offset="55%" stop-color="#F59E0B"/>
+            <stop offset="100%" stop-color="#D97706"/>
+          </radialGradient>
+        </defs>
+        <path d="M32 4C35.2 4 37.9 7.1 40.9 8.1C43.9 9.1 48 7.8 50.5 9.7C53.1 11.6 53.5 15.9 55.3 18.5C57.1 21.1 61.2 22.8 62.2 25.8C63.2 28.8 60.8 32.3 60.8 35.5C60.8 38.7 63.2 42.2 62.2 45.2C61.2 48.2 57.1 49.9 55.3 52.5C53.5 55.1 53.1 59.4 50.5 61.3C48 63.2 43.9 61.9 40.9 62.9C37.9 63.9 35.2 67 32 67C28.8 67 26.1 63.9 23.1 62.9C20.1 61.9 16 63.2 13.5 61.3C10.9 59.4 10.5 55.1 8.7 52.5C6.9 49.9 2.8 48.2 1.8 45.2C0.8 42.2 3.2 38.7 3.2 35.5C3.2 32.3 0.8 28.8 1.8 25.8C2.8 22.8 6.9 21.1 8.7 18.5C10.5 15.9 10.9 11.6 13.5 9.7C16 7.8 20.1 9.1 23.1 8.1C26.1 7.1 28.8 4 32 4Z" transform="scale(0.92) translate(2.8, -1.5)" fill="url(#sunGrad_${uid})"/>
+      </svg>
+    `;
+  }
+  if (iconKey === "clear_night") {
+    return `
+      <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+        <defs>
+          <linearGradient id="moonGrad_${uid}" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#60A5FA"/>
+            <stop offset="100%" stop-color="#3B82F6"/>
+          </linearGradient>
+        </defs>
+        <path d="M41.5 10C30.2 12.1 22 22 22 33.8C22 47.2 32.8 58 46.2 58C50.7 58 54.9 56.8 58.5 54.6C51.6 55.2 44.5 52.1 40.3 46.1C35.2 38.8 36.1 28.9 42.1 22.4C44.3 20 45.9 16.5 41.5 10Z" transform="translate(-6, -2)" fill="url(#moonGrad_${uid})"/>
+      </svg>
+    `;
+  }
+  if (iconKey === "partly_cloudy" || iconKey === "cloudy_night") {
+    const isNight = iconKey === "cloudy_night";
+    return `
+      <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+        <defs>
+          <linearGradient id="cloudGrad_${uid}" x1="16" y1="24" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#E2E8F0"/>
+            <stop offset="100%" stop-color="#94A3B8"/>
+          </linearGradient>
+        </defs>
+        ${isNight
+          ? `<circle cx="24" cy="24" r="11" fill="#60A5FA"/>`
+          : `<circle cx="24" cy="24" r="12" fill="#F59E0B"/>`
+        }
+        <path d="M22 48H48C53.5 48 58 43.5 58 38C58 32.9 54.1 28.7 49.1 28.1C47.4 20.6 40.7 15 32.7 15C23.5 15 16 22.5 16 31.7C16 32.3 16 32.9 16.1 33.5C12.5 34.8 10 38.3 10 42.3C10 45.5 15.4 48 22 48Z" fill="url(#cloudGrad_${uid})"/>
+      </svg>
+    `;
+  }
+  if (iconKey === "rain" || iconKey === "thunder") {
+    return `
+      <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+        <defs>
+          <linearGradient id="rainCloud_${uid}" x1="14" y1="14" x2="52" y2="44" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#CBD5E1"/>
+            <stop offset="100%" stop-color="#64748B"/>
+          </linearGradient>
+        </defs>
+        <path d="M18 42H48C53.5 42 58 37.5 58 32C58 26.9 54.1 22.7 49.1 22.1C47.4 14.6 40.7 9 32.7 9C23.5 9 16 16.5 16 25.7C16 26.3 16 26.9 16.1 27.5C11.5 28.8 8 32.8 8 37.3C8 40.5 12.4 42 18 42Z" fill="url(#rainCloud_${uid})"/>
+        <line x1="22" y1="47" x2="19" y2="56" stroke="#3B82F6" stroke-width="3.5" stroke-linecap="round"/>
+        <line x1="33" y1="47" x2="30" y2="56" stroke="#3B82F6" stroke-width="3.5" stroke-linecap="round"/>
+        <line x1="44" y1="47" x2="41" y2="56" stroke="#3B82F6" stroke-width="3.5" stroke-linecap="round"/>
+      </svg>
+    `;
+  }
+  if (iconKey === "snow") {
+    return `
+      <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+        <path d="M18 42H48C53.5 42 58 37.5 58 32C58 26.9 54.1 22.7 49.1 22.1C47.4 14.6 40.7 9 32.7 9C23.5 9 16 16.5 16 25.7C16 26.3 16 26.9 16.1 27.5C11.5 28.8 8 32.8 8 37.3C8 40.5 12.4 42 18 42Z" fill="#CBD5E1"/>
+        <circle cx="22" cy="51" r="3" fill="#60A5FA"/>
+        <circle cx="33" cy="53" r="3" fill="#60A5FA"/>
+        <circle cx="44" cy="51" r="3" fill="#60A5FA"/>
+      </svg>
+    `;
+  }
+  // 기본 흐림(cloudy)
+  return `
+    <svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" class="weather-svg-icon">
+      <defs>
+        <linearGradient id="cGrad_${uid}" x1="14" y1="18" x2="54" y2="50" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#E2E8F0"/>
+          <stop offset="100%" stop-color="#94A3B8"/>
+        </linearGradient>
+      </defs>
+      <path d="M18 48H48C53.5 48 58 43.5 58 38C58 32.9 54.1 28.7 49.1 28.1C47.4 20.6 40.7 15 32.7 15C23.5 15 16 22.5 16 31.7C16 32.3 16 32.9 16.1 33.5C11.5 34.8 8 38.8 8 43.3C8 46.5 12.4 48 18 48Z" fill="url(#cGrad_${uid})"/>
+    </svg>
+  `;
+}
+
+// 섭씨(°C) / 화씨(°F) 전환
+function switchWeatherUnit(widgetId, unit) {
+  const card = document.getElementById(widgetId);
+  if (!card) return;
+  card.dataset.unit = unit;
+
+  const btnC = card.querySelector(".unit-btn-c");
+  const btnF = card.querySelector(".unit-btn-f");
+  if (btnC && btnF) {
+    btnC.classList.toggle("active", unit === "C");
+    btnF.classList.toggle("active", unit === "F");
+  }
+
+  const mainTemp = card.querySelector(".gw-main-temp");
+  if (mainTemp) {
+    mainTemp.textContent = unit === "C" ? mainTemp.dataset.c : mainTemp.dataset.f;
+  }
+
+  const highEl = card.querySelector(".gw-high-val");
+  const lowEl = card.querySelector(".gw-low-val");
+  if (highEl) highEl.textContent = unit === "C" ? highEl.dataset.c : highEl.dataset.f;
+  if (lowEl) lowEl.textContent = unit === "C" ? lowEl.dataset.c : lowEl.dataset.f;
+
+  // 현재 탭이 온도 탭일 경우 시간대별 온도 값도 갱신
+  const activeTab = card.dataset.tab || "temp";
+  if (activeTab === "temp") {
+    card.querySelectorAll(".gw-hour-val").forEach((el) => {
+      el.textContent = (unit === "C" ? el.dataset.tempC : el.dataset.tempF) + "°";
+    });
+  }
+}
+
+// 온도 / 강수량 / 바람 탭 전환
+function switchWeatherTab(widgetId, tabKey, btnEl) {
+  const card = document.getElementById(widgetId);
+  if (!card) return;
+  card.dataset.tab = tabKey;
+  const unit = card.dataset.unit || "C";
+
+  card.querySelectorAll(".gw-tab-btn").forEach((b) => b.classList.remove("active"));
+  if (btnEl) btnEl.classList.add("active");
+
+  card.querySelectorAll(".gw-hour-val").forEach((el) => {
+    if (tabKey === "temp") {
+      el.textContent = (unit === "C" ? el.dataset.tempC : el.dataset.tempF) + "°";
+    } else if (tabKey === "precip") {
+      el.textContent = el.dataset.precipMm + "mm";
+    } else if (tabKey === "wind") {
+      el.textContent = el.dataset.windMs + "m/s";
+    }
+  });
+}
+
+function renderWeatherWidgetHtml(w) {
+  if (!w || !w.location) return "";
+  const widgetId = "gwWidget_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+  const mainSvg = getWeatherSvgIcon(w.icon, 56);
+
+  let hourlyColsHtml = "";
+  (w.hourly || []).forEach((h) => {
+    const hSvg = getWeatherSvgIcon(h.icon, 30);
+    hourlyColsHtml += `
+      <div class="gw-hour-col">
+        <div class="gw-hour-time">${escapeHtml(h.time_label)}</div>
+        <div class="gw-hour-icon">${hSvg}</div>
+        <div class="gw-hour-pop">${h.precip_prob}%</div>
+        <div class="gw-hour-val"
+             data-temp-c="${h.temp_c}"
+             data-temp-f="${h.temp_f}"
+             data-precip-mm="${h.precip_mm}"
+             data-wind-ms="${h.wind_ms}">${h.temp_c}°</div>
+      </div>
+    `;
+  });
+
+  return `
+    <div class="gemini-weather-card" id="${widgetId}" data-unit="C" data-tab="temp">
+      <div class="gw-location-line">${escapeHtml(w.day_of_week)} · ${escapeHtml(w.location)}</div>
+
+      <div class="gw-hero-row">
+        <div class="gw-main-icon">${mainSvg}</div>
+        <div class="gw-main-temp" data-c="${w.current_temp_c}" data-f="${w.current_temp_f}">${w.current_temp_c}</div>
+        <div class="gw-unit-toggle">
+          <button type="button" class="gw-unit-btn unit-btn-c active" onclick="switchWeatherUnit('${widgetId}', 'C')">°C</button>
+          <span class="gw-unit-sep">|</span>
+          <button type="button" class="gw-unit-btn unit-btn-f" onclick="switchWeatherUnit('${widgetId}', 'F')">°F</button>
+        </div>
+      </div>
+
+      <div class="gw-mid-row">
+        <div class="gw-summary-left">
+          <div class="gw-cond-text">${escapeHtml(w.condition)}</div>
+          <div class="gw-hl-text">
+            <span>높음: <span class="gw-high-val" data-c="${w.high_c}" data-f="${w.high_f}">${w.high_c}</span></span>
+            <span>낮음: <span class="gw-low-val" data-c="${w.low_c}" data-f="${w.low_f}">${w.low_c}</span></span>
+            <span>강수 확률: ${w.precip_prob}%</span>
+          </div>
+        </div>
+        <div class="gw-tabs-right">
+          <button type="button" class="gw-tab-btn active" onclick="switchWeatherTab('${widgetId}', 'temp', this)">온도</button>
+          <button type="button" class="gw-tab-btn" onclick="switchWeatherTab('${widgetId}', 'precip', this)">강수량</button>
+          <button type="button" class="gw-tab-btn" onclick="switchWeatherTab('${widgetId}', 'wind', this)">바람</button>
+        </div>
+      </div>
+
+      <div class="gw-hourly-strip">
+        ${hourlyColsHtml}
+      </div>
+
+      <div class="gw-provider-line">${escapeHtml(w.provider || "웨더뉴스")}</div>
+    </div>
+  `;
+}
+
+// ==============================================================================
 // [2] 대화 세션 및 메시지 처리
 // ==============================================================================
 
@@ -489,10 +694,13 @@ async function resetChat() {
     `;
     document.getElementById("metricLastInput").textContent = "0 토큰";
     document.getElementById("metricLastOutput").textContent = "0 토큰";
+    const lastTurnEl = document.getElementById("metricLastTurn");
+    if (lastTurnEl) lastTurnEl.textContent = "0 / 0 T";
     document.getElementById("metricTotalTokens").textContent = "0 토큰";
     document.getElementById("metricTotalCost").textContent = "0.000원";
 
     loadSessionsList();
+    loadTokenAnalytics();
   } catch (e) {
     alert("세션 초기화 실패: " + e);
   }
@@ -644,10 +852,13 @@ async function switchSession(threadId) {
     const st = data.token_stats || { total_tokens: 0, total_cost_krw: 0, total_cost_usd: 0 };
     document.getElementById("metricLastInput").textContent = "-";
     document.getElementById("metricLastOutput").textContent = "-";
+    const lastTurnEl = document.getElementById("metricLastTurn");
+    if (lastTurnEl) lastTurnEl.textContent = "- / - T";
     document.getElementById("metricTotalTokens").textContent = (st.total_tokens || 0).toLocaleString() + " 토큰";
     document.getElementById("metricTotalCost").textContent = (st.total_cost_krw || 0).toFixed(3) + "원 ($" + (st.total_cost_usd || 0).toFixed(5) + ")";
 
     loadSessionsList();
+    loadTokenAnalytics();
   } catch (e) {
     alert("대화를 불러오지 못했습니다: " + e.message);
   }
@@ -857,6 +1068,7 @@ async function sendMessage() {
     }
 
     const codeExecHtml = renderCodeExecutionsHtml(data.code_executions);
+    const weatherHtml = renderWeatherWidgetHtml(data.weather_data);
     const botReplyHtml = renderBotReplyContent(data.reply, Boolean(data.is_structured));
     const botRow = document.createElement("div");
     botRow.className = "msg-row bot";
@@ -864,6 +1076,7 @@ async function sendMessage() {
       <div class="avatar bot">🤖</div>
       <div class="bubble">
         ${codeExecHtml}
+        ${weatherHtml}
         ${botReplyHtml}
         ${sourcesHtml}
       </div>
@@ -875,8 +1088,12 @@ async function sendMessage() {
     const stats = data.token_stats;
     document.getElementById("metricLastInput").textContent = stats.last_input.toLocaleString() + " 토큰";
     document.getElementById("metricLastOutput").textContent = stats.last_output.toLocaleString() + " 토큰";
+    const lastTurnEl = document.getElementById("metricLastTurn");
+    if (lastTurnEl) {
+      lastTurnEl.textContent = `${stats.last_input.toLocaleString()} / ${stats.last_output.toLocaleString()} T`;
+    }
     document.getElementById("metricTotalTokens").textContent = stats.total_tokens.toLocaleString() + " 토큰";
-    if (model === "ollama") {
+    if (model === "ollama" && stats.total_cost_krw === 0) {
       document.getElementById("metricTotalCost").textContent = "0원 (로컬 무료)";
     } else {
       document.getElementById("metricTotalCost").textContent = stats.total_cost_krw.toFixed(3) + "원 ($" + stats.total_cost_usd.toFixed(5) + ")";
@@ -886,9 +1103,10 @@ async function sendMessage() {
     messageCount += 2;
     document.getElementById("infoMsgCount").textContent = messageCount + "개 메시지";
 
-    // 사이드바 세션 목록 및 캐시 통계 갱신
+    // 사이드바 세션 목록, 캐시 통계, 모델별/기간별 토큰 통계 갱신
     loadSessionsList();
     loadCacheStats();
+    loadTokenAnalytics();
 
   } catch (err) {
     loadingRow.remove();
@@ -989,6 +1207,262 @@ async function clearSearchCache() {
   }
 }
 
+// ==============================================================================
+// [3] 모델별 누적 토큰 카운터 & 기간별(일별/주간별/월별) 사용량 & 비용 계산기
+// ==============================================================================
+
+let currentTokenPeriod = "daily";
+let currentTokenView = "stats";
+
+const CLIENT_MODEL_PRICING = {
+  "gemini-2.5-flash": { input: 0.075, output: 0.30, krw: 1380 },
+  "gemini-2.5-thinking": { input: 0.15, output: 0.60, krw: 1380 },
+  "gemini-2.5-pro": { input: 1.25, output: 5.00, krw: 1380 },
+  "ollama:gemma4:e2b": { input: 0.0, output: 0.0, krw: 1380 },
+};
+
+function formatCompactTokens(num) {
+  const n = Number(num) || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+  return n.toLocaleString();
+}
+
+function toggleTokenAnalyticsDrawer(targetView) {
+  const drawer = document.getElementById("tokenAnalyticsDrawer");
+  if (!drawer) return;
+
+  if (targetView) {
+    const isHidden = drawer.style.display === "none" || drawer.style.display === "";
+    if (!isHidden && currentTokenView === targetView) {
+      drawer.style.display = "none";
+      return;
+    }
+    drawer.style.display = "flex";
+    switchTokenPanelView(targetView);
+    loadTokenAnalytics(currentTokenPeriod);
+  } else {
+    const isHidden = drawer.style.display === "none" || drawer.style.display === "";
+    drawer.style.display = isHidden ? "flex" : "none";
+    if (isHidden) loadTokenAnalytics(currentTokenPeriod);
+  }
+}
+
+function switchTokenPanelView(view) {
+  currentTokenView = view;
+  const viewStats = document.getElementById("taViewStats");
+  const viewCalc = document.getElementById("taViewCalc");
+  const tabStats = document.getElementById("taTabStats");
+  const tabCalc = document.getElementById("taTabCalc");
+  const periodTabs = document.getElementById("taPeriodTabs");
+
+  if (view === "calc") {
+    if (viewStats) viewStats.style.display = "none";
+    if (viewCalc) viewCalc.style.display = "block";
+    if (tabStats) tabStats.classList.remove("active");
+    if (tabCalc) tabCalc.classList.add("active");
+    if (periodTabs) periodTabs.style.display = "none";
+    runTokenCalculator();
+  } else {
+    if (viewStats) viewStats.style.display = "flex";
+    if (viewCalc) viewCalc.style.display = "none";
+    if (tabStats) tabStats.classList.add("active");
+    if (tabCalc) tabCalc.classList.remove("active");
+    if (periodTabs) periodTabs.style.display = "flex";
+  }
+}
+
+function changeTokenPeriod(period) {
+  currentTokenPeriod = period;
+  document.querySelectorAll(".ta-period-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.period === period);
+  });
+  loadTokenAnalytics(period);
+}
+
+async function loadTokenAnalytics(period) {
+  const p = period || currentTokenPeriod || "daily";
+  try {
+    const res = await fetch(`/api/token-stats?period=${encodeURIComponent(p)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const ps = data.period_summary || {};
+
+    // 1. 하단 메트릭 바의 일/주/월 요약 업데이트
+    const dTok = ps.daily?.tokens || 0;
+    const wTok = ps.weekly?.tokens || 0;
+    const mTok = ps.monthly?.tokens || 0;
+    const summaryEl = document.getElementById("metricPeriodSummary");
+    if (summaryEl) {
+      summaryEl.textContent = `일 ${formatCompactTokens(dTok)} · 주 ${formatCompactTokens(wTok)} · 월 ${formatCompactTokens(mTok)}`;
+    }
+
+    // 2. 드로어 상단 4개 요약 카드 업데이트
+    const elDailyTok = document.getElementById("sumDailyTokens");
+    const elDailyCost = document.getElementById("sumDailyCost");
+    if (elDailyTok) elDailyTok.textContent = `${dTok.toLocaleString()} 토큰`;
+    if (elDailyCost) elDailyCost.textContent = `${(ps.daily?.cost_krw || 0).toFixed(3)}원`;
+
+    const elWeeklyTok = document.getElementById("sumWeeklyTokens");
+    const elWeeklyCost = document.getElementById("sumWeeklyCost");
+    if (elWeeklyTok) elWeeklyTok.textContent = `${wTok.toLocaleString()} 토큰`;
+    if (elWeeklyCost) elWeeklyCost.textContent = `${(ps.weekly?.cost_krw || 0).toFixed(3)}원`;
+
+    const elMonthlyTok = document.getElementById("sumMonthlyTokens");
+    const elMonthlyCost = document.getElementById("sumMonthlyCost");
+    if (elMonthlyTok) elMonthlyTok.textContent = `${mTok.toLocaleString()} 토큰`;
+    if (elMonthlyCost) elMonthlyCost.textContent = `${(ps.monthly?.cost_krw || 0).toFixed(3)}원`;
+
+    const aTok = ps.all?.tokens || 0;
+    const elAllTok = document.getElementById("sumAllTokens");
+    const elAllCost = document.getElementById("sumAllCost");
+    if (elAllTok) elAllTok.textContent = `${aTok.toLocaleString()} 토큰`;
+    if (elAllCost) {
+      elAllCost.textContent = `${(ps.all?.cost_krw || 0).toFixed(3)}원 ($${(ps.all?.cost_usd || 0).toFixed(5)})`;
+    }
+
+    // 3. 기간 라벨 갱신
+    const periodNames = {
+      daily: "일별 (오늘)",
+      weekly: "주간별 (최근 7일)",
+      monthly: "월별 (최근 30일)",
+      all: "전체 누적",
+    };
+    const timelineNames = {
+      daily: "일별 사용량 추이",
+      weekly: "주간별 사용량 추이",
+      monthly: "월별 사용량 추이",
+      all: "일별 사용량 추이",
+    };
+    const pLabelEl = document.getElementById("taCurrentPeriodLabel");
+    const tLabelEl = document.getElementById("taTimelineLabel");
+    if (pLabelEl) pLabelEl.textContent = periodNames[p] || "일별";
+    if (tLabelEl) tLabelEl.textContent = timelineNames[p] || "일별 사용량 추이";
+
+    // 4. 모델별 누적 토큰 카운터 테이블 렌더링
+    const tbody = document.getElementById("taModelTableBody");
+    if (tbody) {
+      const models = data.by_model || [];
+      if (models.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#94a3b8;">사용 기록이 없습니다.</td></tr>`;
+      } else {
+        tbody.innerHTML = models
+          .map((m) => {
+            const isFree = m.model_key.includes("ollama");
+            const costStr = isFree
+              ? `<span style="color:#059669; font-weight:600;">0원 (무료)</span>`
+              : `<b>${(m.cost_krw || 0).toFixed(3)}원</b> <span style="font-size:0.7rem; color:#64748b;">($${(m.cost_usd || 0).toFixed(5)})</span>`;
+            return `
+              <tr>
+                <td><span class="model-tag-pill">${escapeHtml(m.model_label)}</span></td>
+                <td>${(m.call_count || 0).toLocaleString()}회</td>
+                <td>${(m.input_tokens || 0).toLocaleString()}</td>
+                <td>${(m.output_tokens || 0).toLocaleString()}</td>
+                <td><b style="color:var(--primary);">${(m.total_tokens || 0).toLocaleString()}</b></td>
+                <td>${costStr}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+    }
+
+    // 5. 일별/주간별/월별 타임라인 바 차트 리스트 렌더링
+    const tList = document.getElementById("taTimelineList");
+    if (tList) {
+      const timeline = data.timeline || [];
+      if (timeline.length === 0) {
+        tList.innerHTML = `<div style="text-align:center; color:#94a3b8; padding:12px;">아직 기록된 사용 내역이 없습니다.</div>`;
+      } else {
+        const maxTok = Math.max(1, ...timeline.map((t) => t.total_tokens || 0));
+        tList.innerHTML = timeline
+          .map((t) => {
+            const pct = Math.min(100, Math.max(4, Math.round(((t.total_tokens || 0) / maxTok) * 100)));
+            return `
+              <div class="ta-time-row">
+                <div class="ta-time-date">${escapeHtml(t.bucket)}</div>
+                <div class="ta-time-bar-wrap">
+                  <div class="ta-time-bar" style="width:${pct}%;"></div>
+                </div>
+                <div class="ta-time-meta">
+                  <b>${(t.total_tokens || 0).toLocaleString()}T</b>
+                  <span>(${(t.cost_krw || 0).toFixed(2)}원 · ${t.call_count}회)</span>
+                </div>
+              </div>
+            `;
+          })
+          .join("");
+      }
+    }
+  } catch (e) {
+    console.error("토큰 통계 로드 실패:", e);
+  }
+}
+
+// 모델별 토큰·비용 시뮬레이션 계산기 실행
+function runTokenCalculator() {
+  const modelKey = document.getElementById("calcModelSelect")?.value || "gemini-2.5-flash";
+  const inTok = Math.max(0, parseInt(document.getElementById("calcInputTokens")?.value || "0", 10));
+  const outTok = Math.max(0, parseInt(document.getElementById("calcOutputTokens")?.value || "0", 10));
+  const dailyCalls = Math.max(1, parseInt(document.getElementById("calcDailyCalls")?.value || "1", 10));
+
+  const price = CLIENT_MODEL_PRICING[modelKey] || CLIENT_MODEL_PRICING["gemini-2.5-flash"];
+  const singleUsd = (inTok / 1_000_000) * price.input + (outTok / 1_000_000) * price.output;
+  const singleKrw = singleUsd * price.krw;
+
+  const dailyUsd = singleUsd * dailyCalls;
+  const dailyKrw = singleKrw * dailyCalls;
+  const weeklyKrw = dailyKrw * 7;
+  const monthlyUsd = dailyUsd * 30;
+  const monthlyKrw = dailyKrw * 30;
+
+  const dailyTokens = (inTok + outTok) * dailyCalls;
+
+  const elSingle = document.getElementById("calcResSingle");
+  const elDaily = document.getElementById("calcResDaily");
+  const elWeekly = document.getElementById("calcResWeekly");
+  const elMonthly = document.getElementById("calcResMonthly");
+
+  if (elSingle) elSingle.textContent = `${singleKrw.toFixed(3)}원 ($${singleUsd.toFixed(5)})`;
+  if (elDaily) elDaily.textContent = `${dailyKrw.toFixed(2)}원 (${formatCompactTokens(dailyTokens)}T/일)`;
+  if (elWeekly) elWeekly.textContent = `${weeklyKrw.toFixed(1)}원 (${formatCompactTokens(dailyTokens * 7)}T/주)`;
+  if (elMonthly) elMonthly.textContent = `${Math.round(monthlyKrw).toLocaleString()}원 ($${monthlyUsd.toFixed(2)} / ${formatCompactTokens(dailyTokens * 30)}T)`;
+}
+
+// 프롬프트 텍스트 실시간 토큰 수 추정
+function estimateTextTokens() {
+  const txt = document.getElementById("calcSampleText")?.value || "";
+  const charCount = txt.length;
+  // 한글/영문 혼합 기준 경험적 토큰 추정: 한글은 글자당 약 0.8~1.1토큰, 영문/공백은 약 0.3토큰
+  let estTokens = 0;
+  for (let i = 0; i < txt.length; i++) {
+    const code = txt.charCodeAt(i);
+    if (code >= 0xac00 && code <= 0xd7a3) {
+      estTokens += 0.9;
+    } else if (code > 127) {
+      estTokens += 0.8;
+    } else {
+      estTokens += 0.28;
+    }
+  }
+  const finalTokens = txt.trim() ? Math.max(1, Math.ceil(estTokens)) : 0;
+
+  const charEl = document.getElementById("estCharCount");
+  const tokEl = document.getElementById("estTokenCount");
+  if (charEl) charEl.textContent = charCount.toLocaleString();
+  if (tokEl) tokEl.textContent = finalTokens.toLocaleString();
+  return finalTokens;
+}
+
+function applyEstimatedTokensToCalc() {
+  const tok = estimateTextTokens();
+  const inEl = document.getElementById("calcInputTokens");
+  if (inEl && tok > 0) {
+    inEl.value = tok;
+    runTokenCalculator();
+  }
+}
+
 // 서버 상태 확인
 async function loadHealth() {
   try {
@@ -1036,5 +1510,7 @@ window.addEventListener("DOMContentLoaded", () => {
   restoreSession();
   loadSessionsList();
   loadCacheStats();
+  loadTokenAnalytics("daily");
+  runTokenCalculator();
   updateModelUI();
 });

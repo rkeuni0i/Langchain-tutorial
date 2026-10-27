@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -67,6 +67,37 @@ CHECKPOINTER = None  # PostgresSaver (DATABASE_URL 미설정/연결 실패 시 I
 DB_POOL: ConnectionPool | None = None
 STORAGE_BACKEND = "memory"
 SESSION_STATS: dict[str, dict] = {}  # 메모리 대체 모드에서만 사용
+MEMORY_USAGE_LOGS: list[dict] = []    # 메모리 모드에서의 턴별 모델 사용량 기록
+
+# 모델별 가격 정책 (100만 토큰당 USD 단가 및 환율)
+USD_TO_KRW = 1380.0
+MODEL_PRICING = {
+    "gemini-2.5-flash": {
+        "label": "Gemini 2.5 Flash (Medium)",
+        "input_per_1m": 0.075,
+        "output_per_1m": 0.30,
+    },
+    "gemini-2.5-flash-low": {
+        "label": "Gemini 2.5 빠른 추론 (Low)",
+        "input_per_1m": 0.075,
+        "output_per_1m": 0.30,
+    },
+    "gemini-2.5-thinking": {
+        "label": "Gemini 2.5 사고 모델 (High)",
+        "input_per_1m": 0.15,
+        "output_per_1m": 0.60,
+    },
+    "gemini-2.5-pro": {
+        "label": "Gemini 2.5 Pro",
+        "input_per_1m": 1.25,
+        "output_per_1m": 5.00,
+    },
+    "ollama:gemma4:e2b": {
+        "label": "로컬 Ollama (gemma4:e2b)",
+        "input_per_1m": 0.0,
+        "output_per_1m": 0.0,
+    },
+}
 
 # LangGraph Store 기반 구글 검색 결과 캐시 설정
 GLOBAL_STORE: BaseStore = InMemoryStore()
@@ -128,6 +159,23 @@ def init_storage():
                 """
             )
             conn.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title TEXT")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_usage_logs (
+                    id             BIGSERIAL PRIMARY KEY,
+                    thread_id      TEXT NOT NULL,
+                    model_key      TEXT NOT NULL,
+                    model_label    TEXT NOT NULL,
+                    input_tokens   BIGINT NOT NULL DEFAULT 0,
+                    output_tokens  BIGINT NOT NULL DEFAULT 0,
+                    cost_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    cost_krw       DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage_logs (created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage_logs (model_key)")
         STORAGE_BACKEND = "postgres"
         print("✅ PostgreSQL 연결 완료: 대화 내용을 DB에 저장합니다.")
     except Exception as e:
@@ -281,8 +329,24 @@ def get_session_stats(thread_id: str) -> dict:
     return SESSION_STATS.get(thread_id, _empty_stats())
 
 
+def resolve_model_key_and_label(model_choice: str, reasoning_effort: str = "medium") -> tuple[str, str]:
+    """선택된 모델과 추론 수준에 따른 고유 모델 키와 표시 이름을 반환합니다."""
+    m = (model_choice or "gemini").lower()
+    effort = (reasoning_effort or "medium").lower()
+    if "ollama" in m:
+        return "ollama:gemma4:e2b", MODEL_PRICING["ollama:gemma4:e2b"]["label"]
+    if effort == "high":
+        return "gemini-2.5-thinking", MODEL_PRICING["gemini-2.5-thinking"]["label"]
+    if effort == "low":
+        return "gemini-2.5-flash-low", MODEL_PRICING["gemini-2.5-flash-low"]["label"]
+    return "gemini-2.5-flash", MODEL_PRICING["gemini-2.5-flash"]["label"]
+
+
 def add_session_stats(thread_id: str, turn: dict) -> dict:
-    """이번 턴의 토큰/비용을 세션 누적값에 더하고 갱신된 누적 통계를 반환합니다."""
+    """이번 턴의 토큰/비용을 세션 누적값 및 모델별 사용 로그(token_usage_logs)에 기록합니다."""
+    model_key = turn.get("model_key", "gemini-2.5-flash")
+    model_label = turn.get("model_label", "Gemini 2.5 Flash (Medium)")
+
     if STORAGE_BACKEND == "postgres":
         with DB_POOL.connection() as conn:
             row = conn.execute(
@@ -299,13 +363,297 @@ def add_session_stats(thread_id: str, turn: dict) -> dict:
                 """,
                 (thread_id, turn["input_tokens"], turn["output_tokens"], turn["cost_krw"], turn["cost_usd"]),
             ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO token_usage_logs (thread_id, model_key, model_label, input_tokens, output_tokens, cost_usd, cost_krw)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    thread_id,
+                    model_key,
+                    model_label,
+                    turn["input_tokens"],
+                    turn["output_tokens"],
+                    turn["cost_usd"],
+                    turn["cost_krw"],
+                ),
+            )
         return dict(row)
+
     sess = SESSION_STATS.setdefault(thread_id, _empty_stats())
     sess["total_input"] += turn["input_tokens"]
     sess["total_output"] += turn["output_tokens"]
     sess["total_cost_krw"] += turn["cost_krw"]
     sess["total_cost_usd"] += turn["cost_usd"]
+    MEMORY_USAGE_LOGS.append({
+        "thread_id": thread_id,
+        "model_key": model_key,
+        "model_label": model_label,
+        "input_tokens": turn["input_tokens"],
+        "output_tokens": turn["output_tokens"],
+        "cost_usd": turn["cost_usd"],
+        "cost_krw": turn["cost_krw"],
+        "created_at": datetime.now(),
+    })
     return sess
+
+
+def get_token_analytics(period: str = "daily") -> dict:
+    """
+    모델별 누적 토큰 사용량 및 일별(daily) / 주간별(weekly) / 월별(monthly) 사용량 통계를 반환합니다.
+    """
+    period = period if period in ("daily", "weekly", "monthly", "all") else "daily"
+    by_model = []
+    timeline = []
+
+    if STORAGE_BACKEND == "postgres":
+        with DB_POOL.connection() as conn:
+            # 1) token_usage_logs가 비어있고 기존 chat_sessions에 누적 데이터가 있다면 초기 마이그레이션 보정
+            cnt_row = conn.execute("SELECT COUNT(*) AS cnt FROM token_usage_logs").fetchone()
+            if cnt_row and cnt_row["cnt"] == 0:
+                conn.execute(
+                    """
+                    INSERT INTO token_usage_logs (thread_id, model_key, model_label, input_tokens, output_tokens, cost_usd, cost_krw, created_at)
+                    SELECT thread_id, 'gemini-2.5-flash', 'Gemini 2.5 Flash (Medium)', total_input, total_output, total_cost_usd, total_cost_krw, updated_at
+                    FROM chat_sessions
+                    WHERE (total_input + total_output) > 0
+                    """
+                )
+
+            # 2) 기간 필터 조건 설정
+            where_clause = ""
+            if period == "daily":
+                where_clause = "WHERE created_at >= CURRENT_DATE"
+            elif period == "weekly":
+                where_clause = "WHERE created_at >= (now() - INTERVAL '7 days')"
+            elif period == "monthly":
+                where_clause = "WHERE created_at >= (now() - INTERVAL '30 days')"
+
+            # 3) 선택된 기간의 모델별 누적 통계
+            m_rows = conn.execute(
+                f"""
+                SELECT
+                    model_key,
+                    MAX(model_label) AS model_label,
+                    COUNT(*) AS call_count,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                    COALESCE(SUM(cost_krw), 0) AS cost_krw
+                FROM token_usage_logs
+                {where_clause}
+                GROUP BY model_key
+                ORDER BY total_tokens DESC
+                """
+            ).fetchall()
+            for r in m_rows:
+                by_model.append({
+                    "model_key": r["model_key"],
+                    "model_label": r["model_label"],
+                    "call_count": int(r["call_count"]),
+                    "input_tokens": int(r["input_tokens"]),
+                    "output_tokens": int(r["output_tokens"]),
+                    "total_tokens": int(r["total_tokens"]),
+                    "cost_usd": round(float(r["cost_usd"]), 6),
+                    "cost_krw": round(float(r["cost_krw"]), 4),
+                })
+
+            # 4) 기간별 추이 (일별: 최근 7일, 주간별: 최근 8주, 월별: 최근 6개월)
+            if period == "daily" or period == "all":
+                t_rows = conn.execute(
+                    """
+                    SELECT
+                        to_char(created_at AT TIME ZONE 'Asia/Seoul', 'MM-DD') AS bucket,
+                        COUNT(*) AS call_count,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+                        COALESCE(SUM(cost_krw), 0) AS cost_krw,
+                        COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM token_usage_logs
+                    WHERE created_at >= (now() - INTERVAL '14 days')
+                    GROUP BY bucket
+                    ORDER BY bucket DESC
+                    LIMIT 10
+                    """
+                ).fetchall()
+            elif period == "weekly":
+                t_rows = conn.execute(
+                    """
+                    SELECT
+                        to_char(date_trunc('week', created_at AT TIME ZONE 'Asia/Seoul'), 'YYYY-MM-DD') || ' 주간' AS bucket,
+                        COUNT(*) AS call_count,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+                        COALESCE(SUM(cost_krw), 0) AS cost_krw,
+                        COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM token_usage_logs
+                    WHERE created_at >= (now() - INTERVAL '8 weeks')
+                    GROUP BY bucket
+                    ORDER BY bucket DESC
+                    LIMIT 8
+                    """
+                ).fetchall()
+            else:  # monthly
+                t_rows = conn.execute(
+                    """
+                    SELECT
+                        to_char(created_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM') AS bucket,
+                        COUNT(*) AS call_count,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+                        COALESCE(SUM(cost_krw), 0) AS cost_krw,
+                        COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM token_usage_logs
+                    WHERE created_at >= (now() - INTERVAL '12 months')
+                    GROUP BY bucket
+                    ORDER BY bucket DESC
+                    LIMIT 12
+                    """
+                ).fetchall()
+
+            for r in t_rows:
+                timeline.append({
+                    "bucket": r["bucket"],
+                    "call_count": int(r["call_count"]),
+                    "input_tokens": int(r["input_tokens"]),
+                    "output_tokens": int(r["output_tokens"]),
+                    "total_tokens": int(r["total_tokens"]),
+                    "cost_krw": round(float(r["cost_krw"]), 4),
+                    "cost_usd": round(float(r["cost_usd"]), 6),
+                })
+
+            # 5) 요약 카드용(오늘 / 최근 7일 / 최근 30일 / 전체 누적)
+            summary_row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN created_at >= CURRENT_DATE THEN input_tokens + output_tokens ELSE 0 END), 0) AS daily_tokens,
+                    COALESCE(SUM(CASE WHEN created_at >= CURRENT_DATE THEN cost_krw ELSE 0 END), 0) AS daily_cost_krw,
+                    COALESCE(SUM(CASE WHEN created_at >= (now() - INTERVAL '7 days') THEN input_tokens + output_tokens ELSE 0 END), 0) AS weekly_tokens,
+                    COALESCE(SUM(CASE WHEN created_at >= (now() - INTERVAL '7 days') THEN cost_krw ELSE 0 END), 0) AS weekly_cost_krw,
+                    COALESCE(SUM(CASE WHEN created_at >= (now() - INTERVAL '30 days') THEN input_tokens + output_tokens ELSE 0 END), 0) AS monthly_tokens,
+                    COALESCE(SUM(CASE WHEN created_at >= (now() - INTERVAL '30 days') THEN cost_krw ELSE 0 END), 0) AS monthly_cost_krw,
+                    COALESCE(SUM(input_tokens + output_tokens), 0) AS all_tokens,
+                    COALESCE(SUM(cost_krw), 0) AS all_cost_krw,
+                    COALESCE(SUM(cost_usd), 0) AS all_cost_usd
+                FROM token_usage_logs
+                """
+            ).fetchone()
+            period_summary = {
+                "daily": {"tokens": int(summary_row["daily_tokens"]), "cost_krw": round(float(summary_row["daily_cost_krw"]), 4)},
+                "weekly": {"tokens": int(summary_row["weekly_tokens"]), "cost_krw": round(float(summary_row["weekly_cost_krw"]), 4)},
+                "monthly": {"tokens": int(summary_row["monthly_tokens"]), "cost_krw": round(float(summary_row["monthly_cost_krw"]), 4)},
+                "all": {
+                    "tokens": int(summary_row["all_tokens"]),
+                    "cost_krw": round(float(summary_row["all_cost_krw"]), 4),
+                    "cost_usd": round(float(summary_row["all_cost_usd"]), 6),
+                },
+            }
+    else:
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now - timedelta(days=7)
+        month_start = now - timedelta(days=30)
+
+        def _in_period(dt: datetime) -> bool:
+            if period == "daily":
+                return dt >= today_start
+            if period == "weekly":
+                return dt >= week_start
+            if period == "monthly":
+                return dt >= month_start
+            return True
+
+        filtered = [lg for lg in MEMORY_USAGE_LOGS if _in_period(lg["created_at"])]
+        agg_model: dict[str, dict] = {}
+        for lg in filtered:
+            mk = lg["model_key"]
+            entry = agg_model.setdefault(mk, {
+                "model_key": mk,
+                "model_label": lg["model_label"],
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "cost_krw": 0.0,
+            })
+            entry["call_count"] += 1
+            entry["input_tokens"] += lg["input_tokens"]
+            entry["output_tokens"] += lg["output_tokens"]
+            entry["total_tokens"] += lg["input_tokens"] + lg["output_tokens"]
+            entry["cost_usd"] += lg["cost_usd"]
+            entry["cost_krw"] += lg["cost_krw"]
+        by_model = sorted(agg_model.values(), key=lambda x: x["total_tokens"], reverse=True)
+
+        agg_time: dict[str, dict] = {}
+        for lg in MEMORY_USAGE_LOGS:
+            dt = lg["created_at"]
+            if period == "weekly":
+                monday = dt - timedelta(days=dt.weekday())
+                b = monday.strftime("%Y-%m-%d") + " 주간"
+            elif period == "monthly":
+                b = dt.strftime("%Y-%m")
+            else:
+                b = dt.strftime("%m-%d")
+            t_entry = agg_time.setdefault(b, {
+                "bucket": b,
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_krw": 0.0,
+                "cost_usd": 0.0,
+            })
+            t_entry["call_count"] += 1
+            t_entry["input_tokens"] += lg["input_tokens"]
+            t_entry["output_tokens"] += lg["output_tokens"]
+            t_entry["total_tokens"] += lg["input_tokens"] + lg["output_tokens"]
+            t_entry["cost_krw"] += lg["cost_krw"]
+            t_entry["cost_usd"] += lg["cost_usd"]
+        timeline = sorted(agg_time.values(), key=lambda x: x["bucket"], reverse=True)[:10]
+
+        def _sum_logs(logs_subset):
+            tok = sum(x["input_tokens"] + x["output_tokens"] for x in logs_subset)
+            krw = round(sum(x["cost_krw"] for x in logs_subset), 4)
+            usd = round(sum(x["cost_usd"] for x in logs_subset), 6)
+            return {"tokens": tok, "cost_krw": krw, "cost_usd": usd}
+
+        period_summary = {
+            "daily": _sum_logs([x for x in MEMORY_USAGE_LOGS if x["created_at"] >= today_start]),
+            "weekly": _sum_logs([x for x in MEMORY_USAGE_LOGS if x["created_at"] >= week_start]),
+            "monthly": _sum_logs([x for x in MEMORY_USAGE_LOGS if x["created_at"] >= month_start]),
+            "all": _sum_logs(MEMORY_USAGE_LOGS),
+        }
+
+    # 모든 지원 모델 목록을 기본 포함하여 0토큰 모델도 확인 가능하게 구성
+    existing_keys = {m["model_key"] for m in by_model}
+    for mk, pinfo in MODEL_PRICING.items():
+        if mk in ("gemini-2.5-pro",):
+            continue
+        if mk not in existing_keys:
+            by_model.append({
+                "model_key": mk,
+                "model_label": pinfo["label"],
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "cost_krw": 0.0,
+            })
+
+    return {
+        "period": period,
+        "period_summary": period_summary,
+        "by_model": by_model,
+        "timeline": timeline,
+        "pricing": MODEL_PRICING,
+        "usd_to_krw": USD_TO_KRW,
+    }
 
 
 @asynccontextmanager
@@ -541,6 +889,257 @@ def google_cse_search(query: str) -> tuple[str, list[dict]]:
     return result_text, sources
 
 
+# ==============================================================================
+# [2-2] 실시간 날씨 조회 및 그래픽 위젯 데이터 생성 (Open-Meteo 연동)
+# ==============================================================================
+WMO_WEATHER_MAP = {
+    0: ("맑음", "sunny"),
+    1: ("대체로 맑음", "sunny"),
+    2: ("구름 조금", "partly_cloudy"),
+    3: ("흐림", "cloudy"),
+    45: ("안개", "cloudy"),
+    48: ("짙은 안개", "cloudy"),
+    51: ("약한 이슬비", "rain"),
+    53: ("이슬비", "rain"),
+    55: ("강한 이슬비", "rain"),
+    61: ("약한 비", "rain"),
+    63: ("비", "rain"),
+    65: ("강한 비", "rain"),
+    71: ("약한 눈", "snow"),
+    73: ("눈", "snow"),
+    75: ("강한 눈", "snow"),
+    77: ("싸락눈", "snow"),
+    80: ("소나기", "rain"),
+    81: ("강한 소나기", "rain"),
+    82: ("폭우", "rain"),
+    85: ("눈보라", "snow"),
+    86: ("강한 눈보라", "snow"),
+    95: ("뇌우", "thunder"),
+    96: ("우박 동반 뇌우", "thunder"),
+    99: ("강한 뇌우", "thunder"),
+}
+
+FALLBACK_COORDS = {
+    "문정동": ("서울특별시 송파구 문정동", 37.4878, 127.1225),
+    "송파구": ("서울특별시 송파구", 37.5145, 127.1059),
+    "강남": ("서울특별시 강남구", 37.5172, 127.0473),
+    "강남구": ("서울특별시 강남구", 37.5172, 127.0473),
+    "서울": ("서울특별시", 37.5665, 126.9780),
+    "부산": ("부산광역시", 35.1796, 129.0756),
+    "인천": ("인천광역시", 37.4563, 126.7052),
+    "대구": ("대구광역시", 35.8714, 128.6014),
+    "대전": ("대전광역시", 36.3504, 127.3845),
+    "광주": ("광주광역시", 35.1595, 126.8526),
+    "울산": ("울산광역시", 35.5384, 129.3114),
+    "세종": ("세종특별자치시", 36.4800, 127.2890),
+    "수원": ("경기도 수원시", 37.2636, 127.0286),
+    "성남": ("경기도 성남시", 37.4200, 127.1267),
+    "분당": ("경기도 성남시 분당구", 37.3827, 127.1189),
+    "판교": ("경기도 성남시 분당구 판교동", 37.3948, 127.1112),
+    "고양": ("경기도 고양시", 37.6584, 126.8320),
+    "일산": ("경기도 고양시 일산", 37.6584, 126.7700),
+    "용인": ("경기도 용인시", 37.2411, 127.1776),
+    "제주": ("제주특별자치도 제주시", 33.4996, 126.5312),
+    "서귀포": ("제주특별자치도 서귀포시", 33.2541, 126.5601),
+    "강릉": ("강원특별자치도 강릉시", 37.7519, 128.8761),
+    "춘천": ("강원특별자치도 춘천시", 37.8813, 127.7298),
+    "전주": ("전북특별자치도 전주시", 35.8242, 127.1480),
+    "청주": ("충청북도 청주시", 36.6424, 127.4890),
+    "천안": ("충청남도 천안시", 36.8151, 127.1139),
+    "포항": ("경상북도 포항시", 36.0190, 129.3435),
+    "창원": ("경상남도 창원시", 35.2280, 128.6811),
+    "여수": ("전라남도 여수시", 34.7604, 127.6622),
+}
+
+WEEKDAY_KO = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+
+
+def _wmo_to_info(code: int, is_day: int = 1) -> tuple[str, str]:
+    cond_text, icon_key = WMO_WEATHER_MAP.get(int(code), ("구름 조금", "partly_cloudy"))
+    if icon_key == "sunny" and not is_day:
+        icon_key = "clear_night"
+    elif icon_key == "partly_cloudy" and not is_day:
+        icon_key = "cloudy_night"
+    return cond_text, icon_key
+
+
+def extract_weather_location(user_msg: str) -> str | None:
+    """사용자 질문이 날씨 관련인지 판별하고 지역명을 추출합니다."""
+    weather_keywords = ["날씨", "기온", "온도", "비 오", "비오", "눈 오", "눈오", "우산", "일기예보", "강수", "미세먼지", "추워", "더워"]
+    if not any(k in user_msg for k in weather_keywords):
+        return None
+
+    for key in FALLBACK_COORDS:
+        if key in user_msg:
+            return key
+
+    stop_words = {
+        "오늘", "내일", "모레", "이번주", "주말", "지금", "현재", "실시간", "날씨", "기온", "온도",
+        "어때", "어때요", "알려줘", "알려주세요", "검색", "검색해줘", "어떨까", "비", "눈", "강수확률", "우산", "있어", "있나요"
+    }
+    tokens = re.findall(r"[가-힣A-Za-z]{2,}", user_msg)
+    candidates = []
+    for t in tokens:
+        clean_t = re.sub(r"(의|은|는|이|가|에서|에|도|를|을|랑|하고)$", "", t)
+        if clean_t and clean_t not in stop_words and not any(k in clean_t for k in ["날씨", "기온", "알려", "어때"]):
+            candidates.append(clean_t)
+
+    return candidates[-1] if candidates else "서울"
+
+
+def fetch_weather_widget_data(location_query: str) -> dict | None:
+    """지역명을 기반으로 Open-Meteo API를 호출하여 Gemini 웹 스타일 날씨 위젯 데이터를 생성합니다."""
+    loc_q = (location_query or "서울").strip()
+    display_location = loc_q
+    lat, lon = None, None
+
+    if loc_q in FALLBACK_COORDS:
+        display_location, lat, lon = FALLBACK_COORDS[loc_q]
+    else:
+        for k, (disp, f_lat, f_lon) in FALLBACK_COORDS.items():
+            if k in loc_q or loc_q in k:
+                display_location, lat, lon = disp, f_lat, f_lon
+                break
+
+    # Open-Meteo Geocoding API 조회
+    try:
+        geo_resp = httpx.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": loc_q, "count": 5, "language": "ko"},
+            timeout=6,
+        )
+        if geo_resp.status_code == 200:
+            results = geo_resp.json().get("results") or []
+            kr_results = [r for r in results if r.get("country_code") == "KR"]
+            chosen = kr_results[0] if kr_results else (results[0] if results else None)
+            if chosen:
+                lat = chosen["latitude"]
+                lon = chosen["longitude"]
+                parts = []
+                for field in ("admin1", "admin2", "admin3", "name"):
+                    val = (chosen.get(field) or "").strip()
+                    if val and re.search(r"[가-힣]", val) and val not in parts:
+                        parts.append(val)
+                if parts:
+                    # 문정1동 -> 문정동 등 사용자가 입력한 동 이름 자연스럽게 보정
+                    joined = " ".join(parts)
+                    if loc_q.endswith("동") and loc_q not in joined:
+                        parts[-1] = loc_q
+                        joined = " ".join(parts)
+                    display_location = joined
+    except Exception as e:
+        print(f"Geocoding 조회 경고 ({loc_q}): {e}")
+
+    if lat is None or lon is None:
+        display_location, lat, lon = FALLBACK_COORDS["서울"]
+
+    try:
+        fc_resp = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,weather_code,wind_speed_10m,precipitation,relative_humidity_2m,is_day",
+                "hourly": "temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,is_day",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "Asia/Seoul",
+                "forecast_days": 2,
+            },
+            timeout=8,
+        )
+        fc_resp.raise_for_status()
+        data = fc_resp.json()
+    except Exception as e:
+        print(f"Open-Meteo 날씨 조회 실패 ({loc_q}): {e}")
+        return None
+
+    now = datetime.now()
+    day_name = WEEKDAY_KO[now.weekday()]
+
+    current = data.get("current", {})
+    daily = data.get("daily", {})
+    hourly = data.get("hourly", {})
+
+    curr_temp_c = round(current.get("temperature_2m", 20))
+    curr_code = current.get("weather_code", 0)
+    curr_is_day = current.get("is_day", 1)
+    condition_text, current_icon = _wmo_to_info(curr_code, curr_is_day)
+
+    high_list = daily.get("temperature_2m_max") or [curr_temp_c]
+    low_list = daily.get("temperature_2m_min") or [curr_temp_c]
+    pop_max_list = daily.get("precipitation_probability_max") or [0]
+
+    high_c = round(high_list[0])
+    low_c = round(low_list[0])
+    precip_prob = int(pop_max_list[0] or 0)
+
+    # 현재 시각 이후 8개 시간대 추출
+    times = hourly.get("time") or []
+    h_temps = hourly.get("temperature_2m") or []
+    h_pops = hourly.get("precipitation_probability") or []
+    h_precips = hourly.get("precipitation") or []
+    h_codes = hourly.get("weather_code") or []
+    h_winds = hourly.get("wind_speed_10m") or []
+    h_is_days = hourly.get("is_day") or []
+
+    now_str = now.strftime("%Y-%m-%dT%H:00")
+    start_idx = 0
+    for idx, t_str in enumerate(times):
+        if t_str >= now_str:
+            start_idx = idx
+            break
+
+    hourly_items = []
+    for i in range(start_idx, min(start_idx + 8, len(times))):
+        t_str = times[i]
+        try:
+            dt = datetime.fromisoformat(t_str)
+            h = dt.hour
+        except Exception:
+            h = (now.hour + (i - start_idx)) % 24
+
+        ampm = "오전" if h < 12 else "오후"
+        disp_h = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+        time_label = f"{disp_h} {ampm}"
+
+        t_c = round(h_temps[i]) if i < len(h_temps) and h_temps[i] is not None else curr_temp_c
+        pop = int(h_pops[i] or 0) if i < len(h_pops) else 0
+        precip_mm = round(float(h_precips[i] or 0.0), 1) if i < len(h_precips) else 0.0
+        w_code = int(h_codes[i] or 0) if i < len(h_codes) else 0
+        wind_ms = round(float(h_winds[i] or 0.0) / 3.6, 1) if i < len(h_winds) else 0.0
+        is_d = int(h_is_days[i]) if i < len(h_is_days) and h_is_days[i] is not None else (1 if 6 <= h < 19 else 0)
+
+        h_cond, h_icon = _wmo_to_info(w_code, is_d)
+        hourly_items.append({
+            "time_label": time_label,
+            "icon": h_icon,
+            "condition": h_cond,
+            "precip_prob": pop,
+            "precip_mm": precip_mm,
+            "temp_c": t_c,
+            "temp_f": round(t_c * 9 / 5 + 32),
+            "wind_ms": wind_ms,
+        })
+
+    return {
+        "location": display_location,
+        "day_of_week": day_name,
+        "current_temp_c": curr_temp_c,
+        "current_temp_f": round(curr_temp_c * 9 / 5 + 32),
+        "condition": condition_text,
+        "icon": current_icon,
+        "high_c": high_c,
+        "high_f": round(high_c * 9 / 5 + 32),
+        "low_c": low_c,
+        "low_f": round(low_c * 9 / 5 + 32),
+        "precip_prob": precip_prob,
+        "humidity": int(current.get("relative_humidity_2m") or 0),
+        "wind_ms": round(float(current.get("wind_speed_10m") or 0.0) / 3.6, 1),
+        "hourly": hourly_items,
+        "provider": "웨더뉴스 · Open-Meteo",
+    }
+
+
 def fetch_url_article(url: str) -> dict | None:
     """웹 URL에서 기사/페이지 본문과 제목, 기자/작성자를 추출합니다."""
     try:
@@ -716,9 +1315,9 @@ def collect_code_executions(response_messages) -> list[dict]:
     return executions
 
 
-def calculate_token_usage_and_cost(response_messages, model_choice: str):
+def calculate_token_usage_and_cost(response_messages, model_choice: str, reasoning_effort: str = "medium"):
     """
-    LangChain 응답 메시지에서 토큰 사용량을 추출하고 예상 비용을 계산합니다.
+    LangChain 응답 메시지에서 토큰 사용량을 추출하고 모델별 단가에 따라 예상 비용을 계산합니다.
     (검색 도구 호출로 모델이 여러 번 호출될 수 있으므로 이번 턴의 AI 메시지 사용량을 합산합니다.)
     """
     input_tokens = 0
@@ -745,14 +1344,18 @@ def calculate_token_usage_and_cost(response_messages, model_choice: str):
         input_tokens = max(1, len(str(user_text)) // 3)
         output_tokens = max(1, len(assistant_text) // 3)
 
-    if "gemini" in model_choice.lower():
-        cost_usd = (input_tokens * 0.000000075) + (output_tokens * 0.00000030)
-        cost_krw = cost_usd * 1380
-    else:
-        cost_usd = 0.0
-        cost_krw = 0.0
+    model_key, model_label = resolve_model_key_and_label(model_choice, reasoning_effort)
+    pricing = MODEL_PRICING.get(model_key, MODEL_PRICING["gemini-2.5-flash"])
+
+    cost_usd = (
+        (input_tokens / 1_000_000.0) * pricing["input_per_1m"]
+        + (output_tokens / 1_000_000.0) * pricing["output_per_1m"]
+    )
+    cost_krw = cost_usd * USD_TO_KRW
 
     return {
+        "model_key": model_key,
+        "model_label": model_label,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost_usd": cost_usd,
@@ -994,6 +1597,26 @@ def chat(req: ChatRequest):
                 + "\n\n".join(web_blocks)
             )
 
+    # 3-1. 날씨 질문 감지 및 실시간 날씨 그래픽 위젯 데이터 수집
+    weather_data = None
+    weather_loc = extract_weather_location(user_msg)
+    if weather_loc:
+        weather_data = fetch_weather_widget_data(weather_loc)
+        if weather_data and not req.structured_output:
+            hourly_summary = ", ".join(
+                f"{h['time_label']}({h['condition']} {h['temp_c']}°C, 강수 {h['precip_prob']}%)"
+                for h in weather_data.get("hourly", [])[:5]
+            )
+            agent_input_msg = (
+                f"{agent_input_msg}\n\n"
+                f"--- [실시간 기상 데이터 ({weather_data['location']}) - 화면 상단에 그래픽 날씨 위젯이 함께 출력됩니다] ---\n"
+                f"- 현재 기온: {weather_data['current_temp_c']}°C ({weather_data['condition']})\n"
+                f"- 최고/최저 기온: 최고 {weather_data['high_c']}°C / 최저 {weather_data['low_c']}°C\n"
+                f"- 강수 확률: {weather_data['precip_prob']}% / 풍속: {weather_data['wind_ms']}m/s\n"
+                f"- 시간대별 예보: {hourly_summary}\n"
+                f"위 기상청/웨더뉴스 데이터를 바탕으로 Gemini 웹 서비스 하단 요약문처럼 1~2문장으로 자연스럽고 간결하게 날씨를 요약해 주세요."
+            )
+
     # 4. LangChain create_agent 생성 (PostgresSaver 체크포인터 & LangGraph Store 연결)
     agent = create_agent(
         model=model,
@@ -1030,14 +1653,16 @@ def chat(req: ChatRequest):
                 sources.insert(0, us)
                 seen_uris.add(us["uri"])
 
-    # 5. 토큰 및 비용 통계를 DB(chat_sessions)에 누적 저장
-    turn_stats = calculate_token_usage_and_cost(response["messages"], req.model)
+    # 5. 토큰 및 비용 통계를 DB(chat_sessions 및 token_usage_logs)에 누적 저장
+    turn_stats = calculate_token_usage_and_cost(response["messages"], req.model, req.reasoning_effort)
     sess = add_session_stats(thread_id, turn_stats)
+    analytics = get_token_analytics("daily")
 
     return {
         "reply": reply_text,
         "thread_id": thread_id,
         "sources": sources,
+        "weather_data": weather_data,
         "is_structured": req.structured_output,
         "code_executions": code_executions,
         "cache_hit": cache_hit,
@@ -1047,15 +1672,29 @@ def chat(req: ChatRequest):
             "total_calls": CACHE_STATS["total_calls"],
         },
         "token_stats": {
+            "model_key": turn_stats["model_key"],
+            "model_label": turn_stats["model_label"],
             "last_input": turn_stats["input_tokens"],
             "last_output": turn_stats["output_tokens"],
+            "last_cost_krw": round(turn_stats["cost_krw"], 4),
+            "last_cost_usd": round(turn_stats["cost_usd"], 6),
             "total_input": sess["total_input"],
             "total_output": sess["total_output"],
             "total_tokens": sess["total_input"] + sess["total_output"],
             "total_cost_krw": round(sess["total_cost_krw"], 4),
             "total_cost_usd": round(sess["total_cost_usd"], 6),
+            "period_summary": analytics["period_summary"],
         },
     }
+
+
+# ==============================================================================
+# [4-0] 모델별 토큰 카운터 및 일별/주간별/월별 사용량 통계 엔드포인트
+# ==============================================================================
+@app.get("/api/token-stats")
+def get_token_stats_endpoint(period: str = "daily"):
+    """모델별 누적 토큰 사용량 및 일별(daily)/주간별(weekly)/월별(monthly) 통계를 반환합니다."""
+    return get_token_analytics(period)
 
 
 # ==============================================================================

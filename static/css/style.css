@@ -1386,3 +1386,574 @@ input:checked + .slider:before { transform: translateX(18px); }
   overflow-x: auto;
   border-left: 3px solid #22c55e;
 }
+
+/* ==============================================================================
+   Gemini 웹 스타일 그래픽 날씨 위젯 (Weather Card)
+   ============================================================================== */
+.gemini-weather-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  padding: 24px 28px 20px;
+  margin-bottom: 14px;
+  color: #1f2937;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+  min-width: 540px;
+  max-width: 680px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+  white-space: normal;
+}
+
+@media (max-width: 768px) {
+  .gemini-weather-card {
+    min-width: 100%;
+    padding: 18px 16px;
+  }
+}
+
+.gw-location-line {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: #1f2937;
+  margin-bottom: 12px;
+}
+
+.gw-hero-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.gw-main-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.gw-main-temp {
+  font-size: 3.3rem;
+  font-weight: 400;
+  line-height: 1.05;
+  color: #111827;
+  letter-spacing: -1px;
+}
+
+.gw-unit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 1rem;
+  color: #6b7280;
+}
+
+.gw-unit-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.gw-unit-btn.active {
+  color: #111827;
+  font-weight: 600;
+}
+
+.gw-unit-btn:hover {
+  color: #374151;
+}
+
+.gw-unit-sep {
+  color: #cbd5e1;
+  font-size: 0.95rem;
+}
+
+.gw-mid-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.gw-summary-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gw-cond-text {
+  font-size: 1.15rem;
+  font-weight: 500;
+  color: #111827;
+}
+
+.gw-hl-text {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.88rem;
+  color: #374151;
+}
+
+.gw-tabs-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gw-tab-btn {
+  background: transparent;
+  border: none;
+  border-radius: 9999px;
+  padding: 7px 16px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: #4b5563;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.gw-tab-btn:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.gw-tab-btn.active {
+  background: #f1f3f4;
+  color: #111827;
+  font-weight: 600;
+}
+
+.gw-hourly-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 6px 2px 14px;
+}
+
+.gw-hourly-strip::-webkit-scrollbar {
+  height: 5px;
+}
+
+.gw-hourly-strip::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.gw-hour-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 58px;
+  flex: 1;
+}
+
+.gw-hour-time {
+  font-size: 0.84rem;
+  color: #374151;
+  white-space: nowrap;
+}
+
+.gw-hour-icon {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gw-hour-pop {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #2563eb;
+}
+
+.gw-hour-val {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: #111827;
+  margin-top: 4px;
+}
+
+.gw-provider-line {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+/* ==============================================================================
+   [4] 모델별 누적 토큰 카운터 & 기간별(일별/주간별/월별) 사용량 & 비용 계산기 스타일
+   ============================================================================== */
+.metric-card {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.metric-card:hover {
+  border-color: #93c5fd;
+  background: #f1f5f9;
+}
+
+.metric-card-interactive {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.btn-open-calc-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--primary);
+  background: #dbeafe;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.token-analytics-drawer {
+  background: #ffffff;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 6px;
+  box-shadow: 0 -6px 24px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 410px;
+  overflow-y: auto;
+}
+
+.ta-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 10px;
+}
+
+.ta-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.ta-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.ta-mode-tabs {
+  display: flex;
+  background: #f1f5f9;
+  padding: 3px;
+  border-radius: 8px;
+  gap: 4px;
+}
+
+.ta-mode-btn {
+  border: none;
+  background: transparent;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ta-mode-btn.active {
+  background: #ffffff;
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.ta-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ta-period-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.ta-period-btn {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ta-period-btn:hover {
+  background: #e2e8f0;
+}
+
+.ta-period-btn.active {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+}
+
+.btn-ta-close {
+  background: none;
+  border: none;
+  font-size: 1rem;
+  color: #64748b;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.btn-ta-close:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.ta-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ta-summary-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.ta-sum-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ta-sum-card:hover {
+  border-color: #93c5fd;
+  background: #f1f5f9;
+}
+
+.ta-sum-card.highlight {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.ta-sum-label {
+  font-size: 0.7rem;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.ta-sum-val {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin-top: 2px;
+}
+
+.ta-sum-sub {
+  font-size: 0.72rem;
+  color: #059669;
+  font-weight: 600;
+  margin-top: 1px;
+}
+
+.ta-tables-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .ta-tables-grid, .calc-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ta-table-box, .calc-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ta-box-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #334155;
+}
+
+.ta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+}
+
+.ta-table th {
+  text-align: left;
+  color: #64748b;
+  font-weight: 600;
+  padding: 5px 6px;
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.ta-table td {
+  padding: 6px 6px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #1e293b;
+}
+
+.model-tag-pill {
+  display: inline-block;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+}
+
+.ta-timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.ta-time-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.74rem;
+}
+
+.ta-time-date {
+  width: 90px;
+  font-weight: 600;
+  color: #334155;
+  flex-shrink: 0;
+}
+
+.ta-time-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ta-time-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+  border-radius: 999px;
+}
+
+.ta-time-meta {
+  width: 145px;
+  text-align: right;
+  font-size: 0.72rem;
+  color: #475569;
+  flex-shrink: 0;
+}
+
+/* 계산기 뷰 */
+.calc-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 12px;
+}
+
+.calc-form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.calc-inputs-3col {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.calc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.72rem;
+  color: #475569;
+  font-weight: 600;
+}
+
+.calc-result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.calc-res-item {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calc-res-item.highlight {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.calc-res-label {
+  font-size: 0.68rem;
+  color: #64748b;
+}
+
+.calc-res-val {
+  font-size: 0.8rem;
+  color: #0f172a;
+}
+
+.calc-text-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: #334155;
+  margin-top: 2px;
+}
+
+

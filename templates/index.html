@@ -67,21 +67,168 @@
 
     <!-- 하단 토큰/비용 대시보드 및 입력창 -->
     <footer>
+      <!-- 모델별 누적 토큰 카운터 & 기간별(일별/주간별/월별) 사용량 & 비용 계산기 드로어 패널 -->
+      <div class="token-analytics-drawer" id="tokenAnalyticsDrawer" style="display: none;">
+        <div class="ta-header">
+          <div class="ta-title-wrap">
+            <span class="ta-title">📊 모델별 누적 토큰 카운터 &amp; 비용 계산기</span>
+            <div class="ta-mode-tabs">
+              <button type="button" class="ta-mode-btn active" id="taTabStats" onclick="switchTokenPanelView('stats')">📈 사용량 통계 (일/주/월)</button>
+              <button type="button" class="ta-mode-btn" id="taTabCalc" onclick="switchTokenPanelView('calc')">🧮 토큰·비용 계산기</button>
+            </div>
+          </div>
+          <div class="ta-header-right">
+            <div class="ta-period-tabs" id="taPeriodTabs">
+              <button type="button" class="ta-period-btn active" data-period="daily" onclick="changeTokenPeriod('daily')">일별 (오늘)</button>
+              <button type="button" class="ta-period-btn" data-period="weekly" onclick="changeTokenPeriod('weekly')">주간별 (7일)</button>
+              <button type="button" class="ta-period-btn" data-period="monthly" onclick="changeTokenPeriod('monthly')">월별 (30일)</button>
+              <button type="button" class="ta-period-btn" data-period="all" onclick="changeTokenPeriod('all')">전체 누적</button>
+            </div>
+            <button type="button" class="btn-ta-close" onclick="toggleTokenAnalyticsDrawer()" title="닫기">✕</button>
+          </div>
+        </div>
+
+        <!-- [뷰 1] 모델별 누적 토큰 & 일별/주간별/월별 사용량 통계 -->
+        <div class="ta-body" id="taViewStats">
+          <!-- 상단 일별/주간별/월별 요약 카드 4종 -->
+          <div class="ta-summary-cards">
+            <div class="ta-sum-card" onclick="changeTokenPeriod('daily')">
+              <div class="ta-sum-label">📅 오늘 (일별) 사용량</div>
+              <div class="ta-sum-val" id="sumDailyTokens">0 토큰</div>
+              <div class="ta-sum-sub" id="sumDailyCost">0.000원</div>
+            </div>
+            <div class="ta-sum-card" onclick="changeTokenPeriod('weekly')">
+              <div class="ta-sum-label">📆 최근 7일 (주간별)</div>
+              <div class="ta-sum-val" id="sumWeeklyTokens">0 토큰</div>
+              <div class="ta-sum-sub" id="sumWeeklyCost">0.000원</div>
+            </div>
+            <div class="ta-sum-card" onclick="changeTokenPeriod('monthly')">
+              <div class="ta-sum-label">🗓️ 최근 30일 (월별)</div>
+              <div class="ta-sum-val" id="sumMonthlyTokens">0 토큰</div>
+              <div class="ta-sum-sub" id="sumMonthlyCost">0.000원</div>
+            </div>
+            <div class="ta-sum-card highlight" onclick="changeTokenPeriod('all')">
+              <div class="ta-sum-label">🏆 전체 누적 총합</div>
+              <div class="ta-sum-val" id="sumAllTokens">0 토큰</div>
+              <div class="ta-sum-sub" id="sumAllCost">0.000원 ($0.00000)</div>
+            </div>
+          </div>
+
+          <div class="ta-tables-grid">
+            <!-- 좌측: 모델별 누적 토큰 카운터 표 -->
+            <div class="ta-table-box">
+              <div class="ta-box-title">🤖 모델별 누적 토큰 사용량 (<span id="taCurrentPeriodLabel">일별</span>)</div>
+              <table class="ta-table">
+                <thead>
+                  <tr>
+                    <th>모델명</th>
+                    <th>호출</th>
+                    <th>입력 토큰</th>
+                    <th>출력 토큰</th>
+                    <th>총 토큰</th>
+                    <th>누적 비용</th>
+                  </tr>
+                </thead>
+                <tbody id="taModelTableBody">
+                  <tr><td colspan="6" style="text-align:center; color:#94a3b8;">데이터를 불러오는 중...</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 우측: 일별/주간별/월별 추이 내역 -->
+            <div class="ta-table-box">
+              <div class="ta-box-title">📊 기간별 사용 추이 (<span id="taTimelineLabel">최근 일별 기록</span>)</div>
+              <div class="ta-timeline-list" id="taTimelineList">
+                <div style="text-align:center; color:#94a3b8; padding:12px;">기록이 없습니다.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- [뷰 2] 모델별 토큰 & 비용 시뮬레이션 계산기 -->
+        <div class="ta-body" id="taViewCalc" style="display: none;">
+          <div class="calc-grid">
+            <!-- 좌측: 직접 토큰 수 입력 & 호출 횟수 시뮬레이터 -->
+            <div class="calc-card">
+              <div class="ta-box-title">🧮 모델별 토큰 비용 계산기 (시뮬레이터)</div>
+              <div class="calc-form-row">
+                <label>대상 모델 선택</label>
+                <select id="calcModelSelect" class="select-input" onchange="runTokenCalculator()">
+                  <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash ($0.075 / $0.30 per 1M)</option>
+                  <option value="gemini-2.5-thinking">Gemini 2.5 사고 모델 High ($0.15 / $0.60 per 1M)</option>
+                  <option value="gemini-2.5-pro">Gemini 2.5 Pro ($1.25 / $5.00 per 1M)</option>
+                  <option value="ollama:gemma4:e2b">로컬 Ollama gemma4:e2b (무료 $0.00)</option>
+                </select>
+              </div>
+              <div class="calc-inputs-3col">
+                <div class="calc-field">
+                  <label>1회 평균 입력 토큰</label>
+                  <input type="number" id="calcInputTokens" class="num-box" style="width:100%;" value="1000" min="0" step="100" oninput="runTokenCalculator()">
+                </div>
+                <div class="calc-field">
+                  <label>1회 평균 출력 토큰</label>
+                  <input type="number" id="calcOutputTokens" class="num-box" style="width:100%;" value="1500" min="0" step="100" oninput="runTokenCalculator()">
+                </div>
+                <div class="calc-field">
+                  <label>일일 예상 질문 횟수</label>
+                  <input type="number" id="calcDailyCalls" class="num-box" style="width:100%;" value="20" min="1" step="5" oninput="runTokenCalculator()">
+                </div>
+              </div>
+              <div class="calc-result-grid">
+                <div class="calc-res-item">
+                  <span class="calc-res-label">1회 요청당 예상</span>
+                  <b class="calc-res-val" id="calcResSingle">0.000원 ($0.00000)</b>
+                </div>
+                <div class="calc-res-item">
+                  <span class="calc-res-label">일별 (1일) 예상 비용</span>
+                  <b class="calc-res-val" id="calcResDaily">0.00원</b>
+                </div>
+                <div class="calc-res-item">
+                  <span class="calc-res-label">주간별 (7일) 예상 비용</span>
+                  <b class="calc-res-val" id="calcResWeekly">0.00원</b>
+                </div>
+                <div class="calc-res-item highlight">
+                  <span class="calc-res-label">월별 (30일) 예상 비용</span>
+                  <b class="calc-res-val" id="calcResMonthly">0원 ($0.00)</b>
+                </div>
+              </div>
+            </div>
+
+            <!-- 우측: 텍스트 실시간 토큰 글자수/토큰수 측정기 -->
+            <div class="calc-card">
+              <div class="ta-box-title">✍️ 프롬프트 텍스트 토큰 추정기</div>
+              <textarea id="calcSampleText" class="textarea-sm" rows="4" placeholder="여기에 텍스트나 프롬프트를 붙여넣으면 예상 토큰 수와 입력 비용을 즉시 계산합니다..." oninput="estimateTextTokens()"></textarea>
+              <div class="calc-text-stats">
+                <span>글자 수: <b id="estCharCount">0</b>자</span>
+                <span>예상 토큰 수: <b id="estTokenCount" style="color:var(--primary);">0</b> 토큰</span>
+                <button type="button" class="preset-btn" onclick="applyEstimatedTokensToCalc()">👈 계산기 입력값으로 적용</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 하단 요약 메트릭 바 (클릭 시 상세 대시보드/계산기 열림) -->
       <div class="metrics-bar">
-        <div class="metric-card">
-          <div class="metric-label">📥 이번 턴 입력</div>
-          <div class="metric-val" id="metricLastInput">0 토큰</div>
+        <div class="metric-card" onclick="toggleTokenAnalyticsDrawer('stats')" title="클릭하여 모델별/기간별 상세 통계 열기">
+          <div class="metric-label">📥 이번 턴 (입/출력)</div>
+          <div class="metric-val" id="metricLastTurn">0 / 0 T</div>
+          <span style="display:none;" id="metricLastInput">0</span>
+          <span style="display:none;" id="metricLastOutput">0</span>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">📤 이번 턴 출력</div>
-          <div class="metric-val" id="metricLastOutput">0 토큰</div>
+        <div class="metric-card" onclick="toggleTokenAnalyticsDrawer('stats')" title="클릭하여 일별/주간별/월별 사용량 보기">
+          <div class="metric-label" id="metricPeriodTitle">📅 일별 / 주간 / 월별</div>
+          <div class="metric-val" id="metricPeriodSummary">일 0T · 주 0T · 월 0T</div>
         </div>
-        <div class="metric-card">
+        <div class="metric-card" onclick="toggleTokenAnalyticsDrawer('stats')" title="클릭하여 모델별 누적 토큰 보기">
           <div class="metric-label">📊 세션 누적 토큰</div>
           <div class="metric-val" id="metricTotalTokens">0 토큰</div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">💰 누적 예상 비용</div>
+        <div class="metric-card metric-card-interactive" onclick="toggleTokenAnalyticsDrawer('calc')" title="클릭하여 모델별 토큰 카운터 & 비용 계산기 열기">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div class="metric-label">💰 누적 비용 · 계산기</div>
+            <span class="btn-open-calc-badge">📊 통계·계산기 ▴</span>
+          </div>
           <div class="metric-val" id="metricTotalCost">0.000원</div>
         </div>
       </div>

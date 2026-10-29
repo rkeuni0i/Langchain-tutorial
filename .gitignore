@@ -9,21 +9,21 @@ wheels/
 # Virtual environments
 .venv
 
-# Environment variables
+# Environment variables (API 키, DB 접속 정보)
 .env
 .env_*
 
+# 로컬 전용 보관함: 옛 평가 스크립트·결과물, 제출용 패키지, 압축본 등 (저장소에 올리지 않음)
+_local_archive/
 
-# RAG: 저작권 있는 원본 PDF, 책 전문이 담긴 DB/캐시, 중복·임시 산출물
+# RAG: 저작권 있는 원본 PDF, 책 전문이 담긴 DB, 압축본
 rag/uploads/*.pdf
 rag/uploads/last_indexed_info.json
 *.db
 *.zip
-rag/temp_views/
-rag/screenshots/
-rag/제출용_RAG/
 
-# RAG: 청크 본문(책 내용)이 들어 있는 평가 원본 (스크립트로 재생성 가능)
+# RAG: 청크 본문(책 내용)이 들어 있는 평가 원본 (capture_ui_35.py / eval_*.py로 재생성)
+rag/ui_run_35.json
 rag/eval_metrics_35.json
 rag/eval_refusal_35.json
 
@@ -32,15 +32,3 @@ scratch_*.txt
 
 # RAG: 인덱싱/질문 실행 로그 (질문·답변 원문 포함, rag/run_logger.py가 생성)
 rag/logs/
-
-# RAG: 동작하지 않는 옛 평가 스크립트와 결과물 (채점이 코드에 하드코딩됨)
-rag/grade_eval.py
-rag/inspect_eval.py
-rag/build_evaluation_report_html.py
-rag/generate_screenshots.py
-rag/run_eval_8_to_30.py
-rag/show_chunks.py
-rag/eval_results_8_to_30.json
-rag/evaluation_dataset.*
-rag/rag_evaluation_report*.html
-rag/RAG_평가셋결과.html

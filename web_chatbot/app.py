@@ -1755,4 +1755,4 @@ if __name__ == "__main__":
     print("👉 웹 브라우저 접속 주소: http://127.0.0.1:8000")
     print("👉 Swagger API 문서: http://127.0.0.1:8000/docs")
     print("=" * 60)
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True, app_dir=str(BASE_DIR))

@@ -11,12 +11,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 esc = html.escape
-PREVIEW_CHARS = 100  # 공개 저장소용: 책 본문은 UI 미리보기 수준(앞 100자)만 노출
-
-
-def preview(text: str) -> str:
-    t = " ".join(text.split())
-    return t[:PREVIEW_CHARS] + ("…" if len(t) > PREVIEW_CHARS else "")
+# 공개 저장소용: 검색 청크는 본문(책 내용) 없이 순위·쪽·점수 메타데이터만 노출
 
 
 questions = json.loads((CURRENT_DIR / "han_gang_35.json").read_text(encoding="utf-8"))
@@ -95,8 +90,8 @@ for r in rows:
     chunks = ""
     for i, c in enumerate(r["chunks"]):
         useful = r["relevance"][i] if i < len(r["relevance"]) else 0
-        chunks += f"""<details><summary><span class="tag {"on" if useful else ""}">{"유용" if useful else "무관"}</span>
-#{c['rank']} · p.{c['page']} · 청크 {c['chunk_index']} · RRF {c['score']} · 앞 100자</summary><p>{esc(preview(c['text']))}</p></details>"""
+        chunks += f"""<div class="chunk"><span class="tag {"on" if useful else ""}">{"유용" if useful else "무관"}</span>
+#{c['rank']} · p.{c['page']} · 청크 {c['chunk_index']} · RRF {c['score']}</div>"""
     note = f'<p class="note">⚠ {esc(r["unsupported_note"])}</p>' if r["unsupported_note"] else ""
     cards += f"""<section class="card" id="q{r['id']}">
 <header><h3>Q{r['id']:02d}. {esc(r['question'])}</h3>
@@ -135,7 +130,7 @@ for q in refusal_qs:
         f"<td>{v['top_score']:.2f}</td></tr>"
     )
     chunk_html = "".join(
-        f"<details><summary>#{c['rank']} · p.{c['page']} · RRF {c['score']}</summary><p>{esc(preview(c['text']))}</p></details>"
+        f"<div class=\"chunk\">#{c['rank']} · p.{c['page']} · RRF {c['score']}</div>"
         for c in v["chunks"]
     )
     ref_cards += f"""<section class="card" id="q{q['id']}">
@@ -190,7 +185,7 @@ table{{width:100%;border-collapse:collapse;font-size:13.5px}}th,td{{padding:7px 
 .pill{{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:1px 10px;font-size:12.5px;margin-right:6px;font-weight:600}}
 .card img{{width:100%;border:1px solid var(--line);border-radius:10px;margin:12px 0}}.cols{{display:grid;gap:18px;grid-template-columns:1fr 1fr}}@media(max-width:760px){{.cols{{grid-template-columns:1fr}}}}
 .claims{{padding-left:0;list-style:none;margin:0;font-size:13.5px}}.claims li{{padding:3px 0}}.claims .ok{{color:var(--fg)}}.claims .ng{{color:var(--bad);font-weight:600}}
-details{{font-size:13px;margin:4px 0}}summary{{cursor:pointer}}details p{{margin:6px 0 6px 6px;color:var(--mut);white-space:pre-wrap}}.tag{{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 6px;margin-right:6px;color:var(--mut)}}.tag.on{{color:var(--good);border-color:var(--good)}}
+.chunk{{font-size:13px;margin:4px 0}}.tag{{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 6px;margin-right:6px;color:var(--mut)}}.tag.on{{color:var(--good);border-color:var(--good)}}
 .note{{font-size:12.5px;color:var(--mut)}}li{{margin:3px 0}}a{{color:var(--acc)}}small{{color:var(--mut);font-weight:400}}.def{{font-size:13.5px;color:var(--mut)}}
 </style></head><body><main>
 <h1>RAG 웹서비스 성능 평가 보고서</h1>

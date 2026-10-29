@@ -48,3 +48,14 @@ python rag/run_rag.py --query "RAG에서 텍스트 분할시 분할의 단위를
 python rag/run_rag.py --interactive
 ```
 
+
+---
+
+## 📊 성능 평가 (35문항)
+
+- 질문: `han_gang_35.json` (답변 가능 30 + 거절 평가 5)
+- 보고서: `RAG_성능평가_35문항.html` (화면 캡처는 `images/q01~q35.png`)
+- 실행 순서 (웹 서비스를 먼저 띄운 뒤): `capture_ui_35.py` → `eval_metrics_35.py` → `eval_refusal_35.py` → `build_report_35.py`
+- 지표: Context Precision@4, Faithfulness, Negative Rejection Rate
+- 페이지 단위 증분 인덱싱: 이미 적재된 PDF 쪽은 OCR·임베딩·저장을 건너뜁니다(`indexed_pages` 테이블, `content_hash` 검사).
+- 원본 PDF(`uploads/*.pdf`)와 인덱싱된 DB는 저작권·용량 문제로 저장소에 포함하지 않습니다. 평가를 재현하려면 같은 PDF를 업로드해 인덱싱하세요.

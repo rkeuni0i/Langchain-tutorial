@@ -14,11 +14,13 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# 현재 디렉토리 sys.path 보정
+# 현재 디렉토리 및 프로젝트 루트 sys.path 보정
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import google.genai as genai
 from google.genai import types
@@ -44,6 +46,32 @@ try:
 except ImportError:
     from gemini_error_debugger import diagnose_gemini_error, print_gemini_429_diagnosis
 
+# ref_code 모델 팩토리 함수 임포트 (DeepSeek, Gemma4 MaaS, Gemini 3.5 Flash-Lite, Claude Haiku 5.5)
+try:
+    from ref_code.deepseek_v4_flash_chatbot import get_deepseek_chat_model
+except Exception:
+    get_deepseek_chat_model = None
+
+try:
+    from ref_code.gemma4_maas_chatbot import get_gemma4_chat_model
+except Exception:
+    get_gemma4_chat_model = None
+
+try:
+    from ref_code.gemini_35_flash_lite_chatbot import get_gemini_35_flash_lite_model
+except Exception:
+    get_gemini_35_flash_lite_model = None
+
+try:
+    from ref_code.claude_haiku_55_chatbot import get_haiku_55_model
+except Exception:
+    get_haiku_55_model = None
+
+try:
+    from .pricing_calculator import calculate_cost, global_usage_tracker
+except ImportError:
+    from pricing_calculator import calculate_cost, global_usage_tracker
+
 
 DEFAULT_OCR_PROMPT = (
     "다음 제공된 PDF 문서에 포함된 모든 글자(텍스트)를 누락 없이 있는 그대로 OCR 추출해 주세요.\n\n"
@@ -65,10 +93,15 @@ class RAGConfig:
 
     # B. 벡터 스토어 및 검색 설정
     db_path: str = str(CURRENT_DIR / "rag_sqlite.db")  # SQLite 파일 경로 (절대경로)
-    top_k: int = 4  # 검색할 관련 청크 수 (기본 4개)
+    top_k: int = 4  # LLM에 최종 전달할 관련 청크 수 (기본 4개)
+    candidate_k: int = 20  # 리랭킹 전 1차 검색 후보 청크 수 (top_k보다 커야 효과 있음)
+    use_query_expansion: bool = True  # 질문을 동의어/연관 키워드로 확장하여 검색 (LLM 1회 호출)
+    use_rerank: bool = True  # 1차 후보를 LLM으로 재정렬하여 상위 top_k만 사용 (LLM 1회 호출)
 
     # C. 모델 설정
     embedding_model: str = "gemini-embedding-2"  # Gemini 2세대 임베딩 모델
+    use_embedding_cache: bool = True  # SQLite 임베딩 캐시 조회 여부 (False면 항상 임베딩 API 호출)
+    ocr_model: str = "gemini-3.8-flash"  # PDF 멀티모달 OCR 모델
     llm_model: str = "gemini-3.8-flash"  # Gemini 또는 Gemma LLM 모델 ("gemini-3.8-flash" | "gemma4:e2b")
     ollama_base_url: str = "http://127.0.0.1:11434"  # Ollama 로컬 서버 API 주소
     temperature: float = 0.2  # LLM 응답 창의성 (0.0: 보수적/정확, 1.0: 창의적)
@@ -107,7 +140,11 @@ class PDFRAGPipeline:
             google_api_key=self.api_key,
         )
 
-        # 3. LLM 모델 초기화 (Gemini 또는 Ollama)
+        # 3. LLM 모델 인스턴스 캐시 및 기본 모델 초기화
+        self._llm_cache: Dict[str, Any] = {}
+        self._tls = threading.local()  # 질문 1건 처리 중 발생한 보조 호출(질의 확장/리랭킹/임베딩) 사용량 기록
+        # 서버 기동 이후 임베딩 캐시 적중/미스 누적 (웹 UI 캐시 현황 표시용)
+        self.cache_counters = {"query_hit": 0, "query_miss": 0, "index_hit": 0, "index_miss": 0}
         self.llm = self._create_llm(self.config.llm_model, self.config.temperature)
 
         # 4. SQLite 벡터 스토어 초기화
@@ -151,10 +188,54 @@ class PDFRAGPipeline:
             pass
 
     def _create_llm(self, model_name: str, temperature: Optional[float] = None) -> Any:
-        """모델명(Gemini vs Gemma/Ollama)에 따라 적절한 LLM 객체 동적 생성"""
+        """모델명에 따라 적절한 LLM 객체 동적 생성
+        지원 모델:
+        - Gemini Cloud: gemini-3.8-flash, etc.
+        - DeepSeek MaaS: deepseek-v4.1-flash, deepseek-ai/deepseek-v4.1-flash-maas
+        - Gemma 4 26B MaaS: gemma-4-26b, google/gemma-4-26b-a4b-it-maas
+        - Gemini Vertex AI: gemini-3.5-flash-lite
+        - Claude Vertex AI: claude-haiku-5-5 (haiku 5.5)
+        - Local Ollama: gemma4:e2b
+        """
         temp = temperature if temperature is not None else self.config.temperature
-        model_lower = model_name.lower()
-        if "gemma" in model_lower or "ollama" in model_lower:
+        model_lower = model_name.lower().strip()
+
+        # 1. DeepSeek V4.1 Flash (GCP Vertex AI Model Garden MaaS)
+        if "deepseek" in model_lower:
+            if get_deepseek_chat_model is None:
+                raise ImportError(
+                    "DeepSeek 모델을 사용하려면 ref_code.deepseek_v4_flash_chatbot 모듈이 필요합니다."
+                )
+            return get_deepseek_chat_model(temperature=temp, streaming=False)
+
+        # 2. Claude Haiku 5.5 (GCP Vertex AI Anthropic)
+        elif "haiku" in model_lower or "claude" in model_lower:
+            if get_haiku_55_model is None:
+                raise ImportError(
+                    "Claude Haiku 5.5 모델을 사용하려면 ref_code.claude_haiku_55_chatbot 모듈이 필요합니다."
+                )
+            # Claude Haiku 5.5는 Vertex AI 상에서 temperature 파라미터가 지원되지 않음(deprecated)
+            return get_haiku_55_model(streaming=False)
+
+        # 3. Gemini 3.5 Flash-Lite (GCP Vertex AI)
+        elif "3.5-flash-lite" in model_lower or "3.5-lite" in model_lower:
+            if get_gemini_35_flash_lite_model is None:
+                raise ImportError(
+                    "Gemini 3.5 Flash-Lite 모델을 사용하려면 ref_code.gemini_35_flash_lite_chatbot 모듈이 필요합니다."
+                )
+            # Gemini 3.5 Flash-Lite는 고정 샘플링이 기본이므로 temperature 생략 권장
+            return get_gemini_35_flash_lite_model(streaming=False)
+
+        # 4. Gemma 4 26B (GCP Vertex AI Model Garden MaaS)
+        elif "26b" in model_lower or "maas" in model_lower or model_lower in ("gemma-4", "gemma4"):
+            if get_gemma4_chat_model is None:
+                raise ImportError(
+                    "Gemma 4 26B MaaS 모델을 사용하려면 ref_code.gemma4_maas_chatbot 모듈이 필요합니다."
+                )
+            return get_gemma4_chat_model(temperature=temp, enable_thinking=False, streaming=False)
+
+        # 5. Local Ollama (e.g. gemma4:e2b)
+        elif ":" in model_lower or "ollama" in model_lower or "e2b" in model_lower:
             if ChatOllama is None:
                 raise ImportError(
                     "Ollama 모델을 사용하려면 langchain-ollama 패키지가 필요합니다."
@@ -164,6 +245,8 @@ class PDFRAGPipeline:
                 base_url=self.config.ollama_base_url,
                 temperature=temp,
             )
+
+        # 6. 기본 Cloud Gemini (ChatGoogleGenerativeAI)
         else:
             return ChatGoogleGenerativeAI(
                 model=model_name,
@@ -326,6 +409,7 @@ class PDFRAGPipeline:
     ) -> Dict[str, Any]:
         """A 단계 전체 실행: PDF 읽기 -> 중복/하위 문서 검사 -> 청크 분할 -> 임베딩 -> SQLite 저장"""
         self._print_header("A. 미리 준비하기 (자료를 등록하거나 변경할 때 · 인덱싱)")
+        self._tls.aux = []  # 이번 인덱싱의 보조 호출(OCR/임베딩) 사용량 목록 초기화
 
         def emit_progress(pct: int, step: str, msg: str, data: Optional[Dict[str, Any]] = None):
             if progress_callback:
@@ -660,6 +744,11 @@ class PDFRAGPipeline:
             "step2_split": step2_output,
             "step3_embed": step3_output,
             "step4_store": step4_output,
+            "page_plan": {
+                "total_pages": len(page_hashes) or step1_output["total_pages"],
+                "new_pages": len(new_indices),
+                "skipped_pages": len(page_hashes) - len(new_indices) if page_hashes else 0,
+            },
         }
 
     def _step_a1_load_pdf(
@@ -730,7 +819,7 @@ class PDFRAGPipeline:
 
         try:
             response = self.genai_client.models.generate_content(
-                model="gemini-3.8-flash",
+                model=self.config.ocr_model,
                 contents=[
                     types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
                     prompt_to_use,
@@ -748,6 +837,19 @@ class PDFRAGPipeline:
         elapsed = time.time() - start_time
 
         extracted_text = response.text or ""
+
+        # OCR 호출 사용량 기록 (google-genai usage_metadata: 출력은 사고 토큰 포함)
+        um = getattr(response, "usage_metadata", None)
+        ocr_in = getattr(um, "prompt_token_count", None)
+        ocr_out = (getattr(um, "candidates_token_count", None) or 0) + (getattr(um, "thoughts_token_count", None) or 0)
+        ocr_estimated = ocr_in is None
+        if ocr_in is None:
+            ocr_in = max(1, pypdf_pages * 258 + len(prompt_to_use) // 3)  # PDF 1쪽 ≈ 258 토큰 가정
+            ocr_out = max(1, len(extracted_text) // 3)
+        self._record_aux_usage(
+            "인덱싱 OCR", self.config.ocr_model, ocr_in, ocr_out,
+            query=f"{file_name} ({pypdf_pages}쪽)", estimated=ocr_estimated,
+        )
 
         # 4. '--- [PAGE N] ---' 패턴으로 페이지별 텍스트 파싱
         page_pattern = re.compile(r"---\s*\[PAGE\s*(\d+)\]\s*---", re.IGNORECASE)
@@ -921,13 +1023,18 @@ class PDFRAGPipeline:
 
         texts = [c.page_content for c in chunks]
 
-        # 1. 로컬 SQLite 임베딩 영구 캐시 조회
-        cached_hits, missing_items = self.vector_store.get_cached_embeddings(
-            model_name=self.config.embedding_model,
-            texts=texts,
-        )
+        # 1. 로컬 SQLite 임베딩 영구 캐시 조회 (캐시 비활성화 시 전부 신규 생성)
+        if self.config.use_embedding_cache:
+            cached_hits, missing_items = self.vector_store.get_cached_embeddings(
+                model_name=self.config.embedding_model,
+                texts=texts,
+            )
+        else:
+            cached_hits, missing_items = {}, list(enumerate(texts))
         hit_count = len(cached_hits)
         miss_count = len(missing_items)
+        self.cache_counters["index_hit"] += hit_count
+        self.cache_counters["index_miss"] += miss_count
 
         print(f"  [캐시 확인] 총 {len(texts)}개 청크 중 캐시 적중(Hit): {hit_count}개, 신규 생성 필요(Miss): {miss_count}개")
 
@@ -942,6 +1049,11 @@ class PDFRAGPipeline:
                 if diag.get("is_429"):
                     print_gemini_429_diagnosis(e)
                 raise
+            self._record_aux_usage(
+                "인덱싱 임베딩", self.config.embedding_model,
+                sum(max(1, len(t) // 3) for t in missing_texts), 0,
+                query=f"{len(missing_texts)}개 청크", estimated=True,
+            )
 
             # 3. 신규 생성된 임베딩을 캐시에 저장
             self.vector_store.save_cached_embeddings(
@@ -1022,16 +1134,32 @@ class PDFRAGPipeline:
         """B 단계 전체 실행: 질문 입력 -> 관련 청크 검색 -> 프롬프트 구성 -> LLM 답변"""
         self._print_header("B. 질문에 답하기 (질문이 들어올 때마다 · 런타임)")
 
+        self._tls.aux = []  # 이번 질문의 보조 호출 사용량 목록 초기화
+
+        # ---------------------------------------------------------
+        # [스텝 B0] 질의 확장 (완공일 -> 완공/준공/완료/개통 등 동의어·연관 키워드 추가)
+        # ---------------------------------------------------------
+        expand_start = time.time()
+        expansion = self._expand_query(question)
+        expand_elapsed = round(time.time() - expand_start, 2)
+        search_text = f"{question} {expansion}".strip() if expansion else question
+
         # ---------------------------------------------------------
         # [스텝 B1] 질문 입력 (질문도 임베딩)
         # ---------------------------------------------------------
-        step1_output = self._step_b1_embed_query(question)
+        step1_output = self._step_b1_embed_query(search_text)
+        step1_output["question"] = question
+        step1_output["expanded_keywords"] = expansion
+        step1_output["expand_elapsed"] = expand_elapsed
 
         # ---------------------------------------------------------
-        # [스텝 B2] 관련 청크 검색 (숫자 비교 -> 원문 반환: 하이브리드 RRF)
+        # [스텝 B2] 관련 청크 검색 (숫자 비교 -> 원문 반환: 하이브리드 RRF + 리랭킹)
         # ---------------------------------------------------------
         step2_output = self._step_b2_search_chunks(
-            step1_output["query_vector"], query_text=question, top_k=top_k
+            step1_output["query_vector"],
+            query_text=search_text,
+            top_k=top_k,
+            rerank_question=question,
         )
 
         # ---------------------------------------------------------
@@ -1056,6 +1184,7 @@ class PDFRAGPipeline:
             "step2_retrieval": step2_output,
             "step3_prompt": step3_output,
             "step4_generation": step4_output,
+            "aux_usage": list(getattr(self._tls, "aux", [])),
             "answer": step4_output["answer"],
         }
 
@@ -1065,16 +1194,25 @@ class PDFRAGPipeline:
         print(f"  [출력값] 사용자 질문: \"{question}\"")
         start_time = time.time()
 
-        cached_hits, _ = self.vector_store.get_cached_embeddings(
-            model_name=self.config.embedding_model,
-            texts=[question],
-        )
-        if 0 in cached_hits:
+        cached_hits = {}
+        if self.config.use_embedding_cache:
+            cached_hits, _ = self.vector_store.get_cached_embeddings(
+                model_name=self.config.embedding_model,
+                texts=[question],
+            )
+        cache_hit = 0 in cached_hits
+        self.cache_counters["query_hit" if cache_hit else "query_miss"] += 1
+        if cache_hit:
             query_vector = cached_hits[0]
             print("  ⚡ [질의어 캐시 적중] 캐시된 질문 임베딩 벡터를 재사용합니다 (API 호출 0원).")
         else:
             try:
                 query_vector = self.embeddings.embed_query(question)
+                # 캐시 미스일 때만 과금 (Gemini 임베딩 API는 토큰 수를 반환하지 않아 글자 수/3으로 추정)
+                self._record_aux_usage(
+                    "질문 임베딩", self.config.embedding_model, max(1, len(question) // 3), 0,
+                    query=question, estimated=True,
+                )
                 self.vector_store.save_cached_embeddings(
                     model_name=self.config.embedding_model,
                     items=[(question, query_vector)],
@@ -1096,26 +1234,139 @@ class PDFRAGPipeline:
             "dimension": len(query_vector),
             "sample_vector": sample_vector,
             "elapsed": round(elapsed, 2),
+            "cache_hit": cache_hit,
             "query_vector": query_vector,
         }
+
+    def get_aux_usage(self) -> List[Dict[str, Any]]:
+        """현재 스레드에서 마지막으로 실행한 index_pdf/ask의 보조 호출 사용량 목록"""
+        return list(getattr(self._tls, "aux", []))
+
+    def _record_aux_usage(
+        self, stage: str, model: str, input_tokens: int, output_tokens: int, query: str = "", estimated: bool = False
+    ) -> Dict[str, Any]:
+        """보조 호출 사용량을 과금 대시보드 트래커와 현재 질문의 aux_usage 목록에 기록"""
+        cost = calculate_cost(model_name=model, input_tokens=input_tokens, output_tokens=output_tokens)
+        global_usage_tracker.record_usage(
+            model=model,
+            stage=stage,
+            query=query,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost["cost_usd"],
+            cost_krw=cost["cost_krw"],
+        )
+        entry = {
+            "stage": stage,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": cost["cost_usd"],
+            "cost_krw": cost["cost_krw"],
+            "estimated": estimated,
+        }
+        if not hasattr(self._tls, "aux"):
+            self._tls.aux = []
+        self._tls.aux.append(entry)
+        return entry
+
+    def _llm_text(self, messages: Any, stage: str = "llm", query: str = "") -> str:
+        """self.llm 호출 결과를 순수 문자열로 정제 (블록 리스트/<think> 제거) 후 사용량 기록"""
+        response = self.llm.invoke(messages)
+        content = response.content
+        usage = getattr(response, "usage_metadata", None) or {}
+        in_tok = usage.get("input_tokens") or usage.get("prompt_tokens")
+        out_tok = usage.get("output_tokens") or usage.get("completion_tokens")
+        estimated = in_tok is None or out_tok is None
+        if in_tok is None:
+            in_tok = max(1, len(str(messages)) // 3)
+        if out_tok is None:
+            out_tok = max(1, len(str(content)) // 3)
+        self._record_aux_usage(stage, self.config.llm_model, in_tok, out_tok, query=query, estimated=estimated)
+        if isinstance(content, list):
+            content = "".join(
+                p["text"] if isinstance(p, dict) and "text" in p else (p if isinstance(p, str) else "")
+                for p in content
+            )
+        return re.sub(r"<(think|thought)>[\s\S]*?</\1>", "", str(content)).strip()
+
+    def _expand_query(self, question: str) -> str:
+        """질의 확장: 질문의 핵심 용어에 대한 동의어/연관 표현을 공백 구분 키워드로 반환 (실패 시 빈 문자열)"""
+        if not self.config.use_query_expansion:
+            return ""
+        try:
+            text = self._llm_text(
+                "다음 질문으로 문서를 검색하려 합니다. 문서에는 질문과 다른 표현이 쓰였을 수 있습니다.\n"
+                "질문의 핵심 용어와 같은 뜻이거나 문서에 실제로 쓰일 법한 동의어/연관 표현(예: 완공일 -> 완공 준공 완료 개통 "
+                "공사 시작 연도)을 10개 이내로, 설명 없이 공백으로만 구분해 한 줄로 출력하세요. 질문에 없는 새로운 고유명사는 만들지 마세요.\n\n"
+                f"질문: {question}",
+                stage="질의 확장",
+                query=question,
+            )
+            keywords = " ".join(text.splitlines()[0].split())[:200] if text else ""
+            print(f"  [질의 확장] \"{question}\" -> + \"{keywords}\"")
+            return keywords
+        except Exception as e:
+            print(f"  [경고] 질의 확장 실패, 원 질문으로 검색합니다: {e}")
+            return ""
+
+    def _rerank_with_llm(
+        self, question: str, candidates: List[Tuple[Document, float]]
+    ) -> List[Tuple[Document, float]]:
+        """1차 후보를 LLM으로 질문 관련도 순 재정렬. 실패/파싱 오류 시 원래 순서 유지"""
+        import json
+
+        listing = "\n\n".join(
+            f"[{i}] (p.{doc.metadata.get('page', '?')}) {doc.page_content.strip()[:700]}"
+            for i, (doc, _) in enumerate(candidates)
+        )
+        try:
+            text = self._llm_text(
+                "아래 후보 문단들 중 질문에 직접 답하는 근거(질문이 묻는 사실·수치·연도 등이 실제로 적힌 문단)를 "
+                "가장 관련 높은 순으로 정렬하세요. 단어만 겹치고 답이 없는 문단은 뒤로 보냅니다.\n"
+                "출력은 후보 번호의 JSON 배열만 (예: [3, 0, 7]). 관련 있는 것만 최대 10개.\n\n"
+                f"질문: {question}\n\n{listing}",
+                stage="리랭킹",
+                query=question,
+            )
+            m = re.search(r"\[[\d,\s]*\]", text)
+            order = [i for i in json.loads(m.group(0)) if isinstance(i, int) and 0 <= i < len(candidates)] if m else []
+            order = list(dict.fromkeys(order))
+            if not order:
+                return candidates
+            rest = [i for i in range(len(candidates)) if i not in order]
+            reordered = [candidates[i] for i in order + rest]
+            print(f"  [리랭킹] 1차 후보 순위 -> 재정렬 상위: {[candidates[i][0].metadata.get('pre_rerank_rank') for i in order[:6]]}")
+            return reordered
+        except Exception as e:
+            print(f"  [경고] 리랭킹 실패, 1차 검색 순서를 유지합니다: {e}")
+            return candidates
 
     def _step_b2_search_chunks(
         self,
         query_vector: List[float],
         query_text: Optional[str] = None,
         top_k: Optional[int] = None,
+        rerank_question: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """스텝 B2. 관련 청크 검색 (하이브리드: Dense 코사인 유사도 + Sparse BM25 키워드 RRF 융합)"""
+        """스텝 B2. 관련 청크 검색 (하이브리드: Dense 코사인 유사도 + Sparse BM25 키워드 RRF 융합 -> 선택적 LLM 리랭킹)"""
         k = top_k if top_k is not None else self.config.top_k
+        do_rerank = bool(rerank_question) and self.config.use_rerank and self.config.candidate_k > k
+        pool_k = self.config.candidate_k if do_rerank else k
         self._print_step("스텝 B2", "관련 청크 검색 (하이브리드: 벡터 + 키워드 RRF)")
-        print(f"  [설정값] 검색 상위 청크 수(top_k): {k}")
+        print(f"  [설정값] 최종 청크 수(top_k): {k}" + (f", 1차 후보 수(candidate_k): {pool_k} -> LLM 리랭킹" if do_rerank else ""))
         if query_text:
             print(f"  [검색방식] 하이브리드 RRF (Dense 벡터 + Sparse 키워드 매칭)")
         start_time = time.time()
 
         search_results = self.vector_store.similarity_search_by_vector(
-            query_vector, top_k=k, query_text=query_text
+            query_vector, top_k=pool_k, query_text=query_text
         )
+        for i, (doc, _) in enumerate(search_results, start=1):
+            doc.metadata["pre_rerank_rank"] = i
+        if do_rerank:
+            search_results = self._rerank_with_llm(rerank_question, search_results)
+        search_results = search_results[:k]
         elapsed = time.time() - start_time
 
         results_preview = []
@@ -1238,11 +1489,15 @@ class PDFRAGPipeline:
         print(f"  [설정값] LLM 모델: {chosen_model} (temperature: {temp})")
         start_time = time.time()
 
-        # 설정된 기본 모델과 동일하면 self.llm 재사용, 다르면 동적 인스턴스 생성
+        # 설정된 기본 모델과 동일하면 self.llm 재사용, 다르면 캐시 확인 또는 동적 인스턴스 생성
+        cache_key = f"{chosen_model}_{temp}"
         if chosen_model == self.config.llm_model and (temperature is None or temperature == self.config.temperature):
             target_llm = self.llm
+        elif cache_key in self._llm_cache:
+            target_llm = self._llm_cache[cache_key]
         else:
             target_llm = self._create_llm(chosen_model, temp)
+            self._llm_cache[cache_key] = target_llm
 
         try:
             response = target_llm.invoke(messages)
@@ -1271,7 +1526,30 @@ class PDFRAGPipeline:
         # 모델 응답에 <think>...</think> 또는 <thought>...</thought> 블록이 있을 경우 후처리
         answer_text = re.sub(r"<(think|thought)>[\s\S]*?</\1>", "", answer_text).strip()
 
+        # 토큰 카운트 추출 (LangChain usage_metadata 우선, 없을 경우 휴리스틱 보정)
+        usage_meta = getattr(response, "usage_metadata", None) or {}
+        input_tokens = usage_meta.get("input_tokens") or usage_meta.get("prompt_tokens")
+        output_tokens = usage_meta.get("output_tokens") or usage_meta.get("completion_tokens")
+        total_tokens = usage_meta.get("total_tokens")
+
+        if input_tokens is None:
+            # 한글/영문 혼합 기준 약 2.5~3문자당 1토큰
+            full_prompt_len = sum(len(str(getattr(m, "content", m))) for m in messages)
+            input_tokens = max(1, full_prompt_len // 3)
+        if output_tokens is None:
+            output_tokens = max(1, len(answer_text) // 3)
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+
+        cost_info = calculate_cost(
+            model_name=chosen_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
         print(f"  [출력값] LLM({chosen_model}) 답변 생성 완료 ({len(answer_text)}자, 소요시간: {elapsed:.2f}초)")
+        print(f"  [토큰 사용량] 입력: {input_tokens} tok / 출력: {output_tokens} tok (총 {total_tokens} tok)")
+        print(f"  [예상 과금액] ${cost_info['cost_usd']:.6f} USD (약 {cost_info['cost_krw']:.2f} KRW)")
         print(f"\n{'=' * 60}")
         print(" [최종 생성된 답변]")
         print(f"{'=' * 60}")
@@ -1282,6 +1560,7 @@ class PDFRAGPipeline:
             "answer": answer_text,
             "latency": round(elapsed, 2),
             "model": chosen_model,
+            "usage": cost_info,
         }
 
     # =========================================================================

@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -31,17 +32,21 @@ if sys.platform == "win32":
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 try:
     from .rag_pipeline import DEFAULT_OCR_PROMPT, PDFRAGPipeline, RAGConfig
     from .sqlite_vector_store import SQLiteVectorStore
     from .gemini_error_debugger import diagnose_gemini_error, print_gemini_429_diagnosis
+    from .pricing_calculator import global_usage_tracker, MODEL_PRICING, USD_TO_KRW, calculate_cost
+    from .run_logger import log_index_run, log_query_run, log_path, new_run_id, read_runs, summarize_query_runs
 except ImportError:
     from rag_pipeline import DEFAULT_OCR_PROMPT, PDFRAGPipeline, RAGConfig
     from sqlite_vector_store import SQLiteVectorStore
     from gemini_error_debugger import diagnose_gemini_error, print_gemini_429_diagnosis
+    from pricing_calculator import global_usage_tracker, MODEL_PRICING, USD_TO_KRW, calculate_cost
+    from run_logger import log_index_run, log_query_run, log_path, new_run_id, read_runs, summarize_query_runs
 
 # 업로드 디렉토리 준비 (rag/uploads)
 UPLOAD_DIR = CURRENT_DIR / "uploads"
@@ -101,7 +106,14 @@ async def get_status():
             "top_k": pipeline.config.top_k,
             "embedding_model": pipeline.config.embedding_model,
             "llm_model": pipeline.config.llm_model,
-            "available_llm_models": ["gemini-3.8-flash", "gemma4:e2b"],
+            "available_llm_models": [
+                "gemini-3.8-flash",
+                "gemini-3.5-flash-lite",
+                "deepseek-v4.1-flash",
+                "gemma-4-26b",
+                "claude-haiku-5-5",
+                "gemma4:e2b",
+            ],
             "db_path": pipeline.config.db_path,
             "ocr_prompt": pipeline.config.ocr_prompt,
         },
@@ -121,6 +133,86 @@ async def clear_database():
 async def get_document_pages():
     """현재 인덱싱된 문서의 페이지별 전체 내용 및 메타데이터 조회"""
     return pipeline.get_document_pages()
+
+
+@app.get("/api/cost-dashboard")
+async def get_cost_dashboard():
+    """모델별 토큰 사용량 및 과금 현황 대시보드 데이터 조회"""
+    return global_usage_tracker.get_summary()
+
+
+@app.post("/api/cost-dashboard/reset")
+async def reset_cost_dashboard():
+    """누적 토큰 사용량 및 과금 데이터 초기화"""
+    global_usage_tracker.reset()
+    return {"message": "대시보드 통계가 초기화되었습니다.", "summary": global_usage_tracker.get_summary()}
+
+
+class CacheToggleRequest(BaseModel):
+    enabled: bool
+
+
+def _embedding_cache_status() -> Dict[str, Any]:
+    overview = pipeline.vector_store.get_cache_overview(pipeline.config.embedding_model)
+    c = pipeline.cache_counters
+    q_total = c["query_hit"] + c["query_miss"]
+    i_total = c["index_hit"] + c["index_miss"]
+    return {
+        "enabled": pipeline.config.use_embedding_cache,
+        "embedding_model": pipeline.config.embedding_model,
+        **overview,
+        "session": {
+            **c,
+            "query_hit_rate": round(c["query_hit"] / q_total, 3) if q_total else None,
+            "index_hit_rate": round(c["index_hit"] / i_total, 3) if i_total else None,
+        },
+    }
+
+
+@app.get("/api/embedding-cache")
+async def get_embedding_cache():
+    """임베딩 캐시 현황 (사용 여부, 저장 건수/용량, 현재 DB 청크 보유율, 서버 기동 후 적중률)"""
+    return _embedding_cache_status()
+
+
+@app.post("/api/embedding-cache/toggle")
+async def toggle_embedding_cache(request: CacheToggleRequest):
+    """임베딩 캐시 사용 ON/OFF (OFF면 조회 없이 항상 임베딩 API 호출, 실행 로그에 use_embedding_cache로 기록)"""
+    pipeline.config.use_embedding_cache = request.enabled
+    return _embedding_cache_status()
+
+
+@app.delete("/api/embedding-cache")
+async def clear_embedding_cache():
+    """임베딩 캐시 전체 비우기 (벡터 DB의 청크는 유지)"""
+    deleted = pipeline.vector_store.clear_embedding_cache()
+    return {"deleted": deleted, **_embedding_cache_status()}
+
+
+@app.get("/api/run-logs")
+async def get_run_logs(kind: str = "query", limit: int = 500):
+    """실행 로그 조회 (kind=query|index, 최신순). 질문 로그는 설정 조합별 비교 요약을 함께 반환"""
+    if kind not in ("query", "index"):
+        raise HTTPException(status_code=400, detail="kind는 query 또는 index만 가능합니다.")
+    records = read_runs(kind, limit=limit)
+    return {
+        "kind": kind,
+        "path": str(log_path(kind)),
+        "count": len(records),
+        "records": records,
+        "summary": summarize_query_runs(records) if kind == "query" else None,
+    }
+
+
+@app.get("/api/run-logs/download")
+async def download_run_logs(kind: str = "query"):
+    """실행 로그 원본(JSONL) 다운로드"""
+    if kind not in ("query", "index"):
+        raise HTTPException(status_code=400, detail="kind는 query 또는 index만 가능합니다.")
+    path = log_path(kind)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="아직 기록된 로그가 없습니다.")
+    return FileResponse(path, media_type="application/x-ndjson", filename=path.name)
 
 
 def _format_index_response(
@@ -228,6 +320,14 @@ async def index_pdf_file(
     with open(save_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    run_id = new_run_id()
+    log_params = {
+        "clear_existing": clear_existing,
+        "detect_subset": detect_subset,
+        "force_reindex": force_reindex,
+        "ocr_prompt": ocr_prompt,
+    }
+    started = time.time()
     try:
         result = pipeline.index_pdf(
             str(save_path),
@@ -236,8 +336,16 @@ async def index_pdf_file(
             detect_subset=detect_subset,
             force_reindex=force_reindex,
         )
+        log_index_run(
+            run_id=run_id, pipeline=pipeline, file_path=str(save_path), params=log_params,
+            wall_time=time.time() - started, result=result, aux_usage=pipeline.get_aux_usage(),
+        )
         return _format_index_response(result, file.filename, chunk_size, chunk_overlap, pipeline)
     except Exception as e:
+        log_index_run(
+            run_id=run_id, pipeline=pipeline, file_path=str(save_path), params=log_params,
+            wall_time=time.time() - started, aux_usage=pipeline.get_aux_usage(), error=str(e),
+        )
         diag = diagnose_gemini_error(e)
         if diag.get("is_429"):
             print_gemini_429_diagnosis(e)
@@ -289,6 +397,14 @@ async def index_pdf_file_stream(
             })
 
         def run_indexing():
+            run_id = new_run_id()
+            log_params = {
+                "clear_existing": clear_existing,
+                "detect_subset": detect_subset,
+                "force_reindex": force_reindex,
+                "ocr_prompt": ocr_prompt,
+            }
+            started = time.time()
             try:
                 res = pipeline.index_pdf(
                     str(save_path),
@@ -298,11 +414,19 @@ async def index_pdf_file_stream(
                     detect_subset=detect_subset,
                     force_reindex=force_reindex,
                 )
+                log_index_run(
+                    run_id=run_id, pipeline=pipeline, file_path=str(save_path), params=log_params,
+                    wall_time=time.time() - started, result=res, aux_usage=pipeline.get_aux_usage(),
+                )
                 final_payload = _format_index_response(
                     res, file.filename, chunk_size, chunk_overlap, pipeline
                 )
                 event_queue.put({"type": "complete", "result": final_payload})
             except Exception as ex:
+                log_index_run(
+                    run_id=run_id, pipeline=pipeline, file_path=str(save_path), params=log_params,
+                    wall_time=time.time() - started, aux_usage=pipeline.get_aux_usage(), error=str(ex),
+                )
                 diag = diagnose_gemini_error(ex)
                 if diag.get("is_429"):
                     print_gemini_429_diagnosis(ex)
@@ -322,11 +446,6 @@ async def index_pdf_file_stream(
                 item = event_queue.get(timeout=25)
                 if item is None:
                     break
-                payload = json.dumps(item, ensure_ascii=False)
-                yield f"data: {payload}\n\n"
-            except queue.Empty:
-                # HTTP 연결 유지용 SSE 주석 전송
-                yield ": keep-alive\n\n"
                 payload = json.dumps(item, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
             except queue.Empty:
@@ -357,8 +476,15 @@ async def ask_question(request: AskRequest):
         pipeline.config.top_k = request.top_k
     if request.temperature is not None:
         pipeline.config.temperature = request.temperature
-        pipeline.llm.temperature = request.temperature
+        if hasattr(pipeline.llm, "temperature"):
+            try:
+                pipeline.llm.temperature = request.temperature
+            except Exception:
+                pass
 
+    run_id = new_run_id()
+    log_params = {"llm_model": request.llm_model, "top_k": request.top_k, "temperature": request.temperature}
+    started = time.time()
     try:
         # B단계 런타임 질의응답 파이프라인 실행
         result = pipeline.ask(
@@ -366,6 +492,28 @@ async def ask_question(request: AskRequest):
             top_k=request.top_k,
             temperature=request.temperature,
             llm_model=request.llm_model,
+        )
+        log_query_run(
+            run_id=run_id, pipeline=pipeline, question=request.query, params=log_params,
+            wall_time=time.time() - started, result=result, aux_usage=result.get("aux_usage"),
+        )
+
+        # 토큰 사용량 및 과금 데이터 전역 트래커에 누적 기록
+        gen_usage = result["step4_generation"].get("usage", {})
+        inp_tok = gen_usage.get("input_tokens", 0)
+        out_tok = gen_usage.get("output_tokens", 0)
+        cost_usd = gen_usage.get("cost_usd", 0.0)
+        cost_krw = gen_usage.get("cost_krw", 0.0)
+        latency = result["step4_generation"].get("latency", 0.0)
+
+        global_usage_tracker.record_query(
+            model=result["step4_generation"]["model"],
+            query=request.query,
+            input_tokens=inp_tok,
+            output_tokens=out_tok,
+            cost_usd=cost_usd,
+            cost_krw=cost_krw,
+            latency=latency,
         )
 
         return {
@@ -393,9 +541,14 @@ async def ask_question(request: AskRequest):
                 "model": result["step4_generation"]["model"],
                 "latency": result["step4_generation"]["latency"],
                 "answer_len": len(result["step4_generation"]["answer"]),
+                "usage": gen_usage,
             },
         }
     except Exception as e:
+        log_query_run(
+            run_id=run_id, pipeline=pipeline, question=request.query, params=log_params,
+            wall_time=time.time() - started, aux_usage=pipeline.get_aux_usage(), error=str(e),
+        )
         diag = diagnose_gemini_error(e)
         if diag.get("is_429"):
             print_gemini_429_diagnosis(e)
@@ -452,10 +605,24 @@ async def serve_ui():
                     <p class="text-xs text-slate-500">Gemini 임베딩-2 & Gemini 3.8 Flash / Ollama Gemma 4:e2b & SQLite 벡터 DB 기반</p>
                 </div>
             </div>
-            <div class="flex items-center gap-3 text-xs">
+            <div class="flex items-center gap-2.5 text-xs">
+                <button onclick="openCostDashboardModal()" class="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-semibold px-3 py-1.5 rounded-lg shadow-sm transition flex items-center gap-1.5 cursor-pointer">
+                    <i class="fa-solid fa-chart-pie"></i> 토큰 & 과금 대시보드
+                    <span id="headerCostBadge" class="ml-1 bg-black/20 text-white text-[11px] px-2 py-0.5 rounded-full font-mono font-bold">$0.0000 (0원)</span>
+                </button>
                 <span id="dbBadge" class="bg-slate-100 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5">
                     <i class="fa-solid fa-database text-emerald-600"></i> 저장된 청크: <span id="chunkCount">0</span>개
                 </span>
+                <button onclick="openRunLogModal()" title="인덱싱/질문 실행 로그"
+                        class="bg-slate-800 hover:bg-slate-900 text-white px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                    <i class="fa-solid fa-list-check"></i> 실행 로그
+                </button>
+                <button onclick="openCacheModal()" id="cacheBadge" title="임베딩 캐시 현황"
+                        class="bg-slate-100 border border-slate-200 text-slate-700 hover:bg-slate-200 px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                    <i class="fa-solid fa-bolt text-amber-500"></i> 임베딩 캐시:
+                    <span id="cacheBadgeState" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-500">-</span>
+                    <span id="cacheBadgeCount">0</span>개
+                </button>
                 <button onclick="clearDb()" class="text-rose-600 hover:bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-lg transition" title="DB 초기화">
                     <i class="fa-solid fa-trash-can mr-1"></i> DB 비우기
                 </button>
@@ -732,12 +899,16 @@ async def serve_ui():
                                placeholder="예: RAG의 주요 이점과 청크 오버랩을 두는 이유는 무엇인가요?"
                                class="w-full px-3.5 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm"/>
                     </div>
-                    <div class="w-56">
+                    <div class="w-64">
                         <label class="block text-xs font-semibold text-slate-700 mb-1">
                             <i class="fa-solid fa-microchip text-indigo-600 mr-1"></i> LLM 모델 선택
                         </label>
                         <select id="modelSelect" class="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-sm font-semibold text-slate-700">
-                            <option value="gemini-3.8-flash" selected>💎 Gemini 3.8 Flash (Cloud)</option>
+                            <option value="gemini-3.8-flash" selected>✨ Gemini 3.8 Flash (Cloud)</option>
+                            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash-Lite (Vertex AI)</option>
+                            <option value="deepseek-v4.1-flash">🐳 DeepSeek V4.1 Flash (GCP MaaS)</option>
+                            <option value="gemma-4-26b">💎 Gemma 4 26B (GCP MaaS)</option>
+                            <option value="claude-haiku-5-5">🎭 Claude Haiku 5.5 (Vertex AI)</option>
                             <option value="gemma4:e2b">🦙 Gemma 4:e2b (Ollama Local)</option>
                         </select>
                     </div>
@@ -962,6 +1133,370 @@ async def serve_ui():
         </div>
     </div>
 
+    <!-- ===================================================================== -->
+    <!-- 실행 로그 모달 (인덱싱 / 질문) -->
+    <!-- ===================================================================== -->
+    <div id="runLogModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm items-center justify-center p-4" onclick="if (event.target === this) closeRunLogModal()">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-7xl max-h-[94vh] flex flex-col overflow-hidden border border-slate-200">
+            <div class="px-5 py-4 bg-gradient-to-r from-slate-900 to-slate-800 text-white flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-xl bg-indigo-500 flex items-center justify-center"><i class="fa-solid fa-list-check"></i></div>
+                    <div>
+                        <h3 class="text-base font-bold">실행 로그</h3>
+                        <p class="text-xs text-slate-300" id="runLogPath">'인덱싱 시작' / '질문하기' 1회마다 한 줄씩 기록됩니다</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 text-xs">
+                    <div class="bg-white/10 rounded-lg p-0.5 flex">
+                        <button type="button" id="runLogTabQuery" onclick="switchRunLogTab('query')" class="px-3 py-1.5 rounded-md cursor-pointer">질문 로그</button>
+                        <button type="button" id="runLogTabIndex" onclick="switchRunLogTab('index')" class="px-3 py-1.5 rounded-md cursor-pointer">인덱싱 로그</button>
+                    </div>
+                    <button type="button" onclick="refreshRunLogs()" class="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg border border-white/10 cursor-pointer">
+                        <i class="fa-solid fa-rotate text-[11px]"></i> 새로고침
+                    </button>
+                    <a id="runLogDownload" href="/api/run-logs/download?kind=query" class="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg border border-white/10">
+                        <i class="fa-solid fa-download text-[11px]"></i> JSONL
+                    </a>
+                    <button type="button" onclick="closeRunLogModal()" class="w-8 h-8 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white cursor-pointer">
+                        <i class="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-5 overflow-y-auto space-y-5 bg-slate-50/70 text-xs">
+                <!-- 조합별 비교 요약 (질문 로그 전용) -->
+                <div id="runLogSummaryBox" class="bg-white rounded-xl border border-slate-200">
+                    <div class="px-4 py-3 border-b border-slate-100">
+                        <div class="font-bold text-slate-900 text-sm"><i class="fa-solid fa-ranking-star text-amber-500 mr-1"></i> 설정 조합별 비교</div>
+                        <div class="text-slate-500 mt-0.5">성공한 질문만 집계합니다. 정답 페이지 적중률과 키워드 재현율은 35문항 평가셋과 똑같은 질문에서만 계산되며, 재현율 높은 순 → 비용 낮은 순으로 정렬됩니다.</div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left whitespace-nowrap">
+                            <thead class="bg-slate-50 text-slate-500">
+                                <tr>
+                                    <th class="py-2 px-3 font-semibold">LLM</th>
+                                    <th class="py-2 px-3 font-semibold text-center">top_k</th>
+                                    <th class="py-2 px-3 font-semibold text-center">질의 확장</th>
+                                    <th class="py-2 px-3 font-semibold text-center">리랭킹</th>
+                                    <th class="py-2 px-3 font-semibold text-center">임베딩 캐시</th>
+                                    <th class="py-2 px-3 font-semibold text-center">chunk_size</th>
+                                    <th class="py-2 px-3 font-semibold text-right">실행 (평가)</th>
+                                    <th class="py-2 px-3 font-semibold text-right">평균 비용</th>
+                                    <th class="py-2 px-3 font-semibold text-right">평균 소요</th>
+                                    <th class="py-2 px-3 font-semibold text-right">정답 페이지 적중</th>
+                                    <th class="py-2 px-3 font-semibold text-right">키워드 재현율</th>
+                                </tr>
+                            </thead>
+                            <tbody id="runLogSummaryBody" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 실행 기록 목록 -->
+                <div class="bg-white rounded-xl border border-slate-200">
+                    <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                        <div class="font-bold text-slate-900 text-sm"><i class="fa-solid fa-clock-rotate-left text-indigo-500 mr-1"></i> 실행 기록 <span id="runLogCount" class="text-slate-400 font-normal"></span></div>
+                        <div class="text-slate-400">행을 클릭하면 전체 기록(JSON)을 볼 수 있습니다</div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left whitespace-nowrap">
+                            <thead class="bg-slate-50 text-slate-500" id="runLogHead"></thead>
+                            <tbody id="runLogBody" class="divide-y divide-slate-100"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 임베딩 캐시 현황 모달 -->
+    <!-- ===================================================================== -->
+    <div id="cacheModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm items-center justify-center p-4" onclick="if (event.target === this) closeCacheModal()">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
+            <div class="px-5 py-4 bg-gradient-to-r from-slate-900 to-slate-800 text-white flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center"><i class="fa-solid fa-bolt"></i></div>
+                    <div>
+                        <h3 class="text-base font-bold">임베딩 캐시 현황</h3>
+                        <p class="text-xs text-slate-300">같은 텍스트는 다시 임베딩하지 않고 SQLite에 저장된 벡터를 재사용합니다 (API 비용 0원)</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="refreshCacheModal()" class="px-3 py-1.5 text-xs bg-white/10 hover:bg-white/20 rounded-lg border border-white/10 cursor-pointer">
+                        <i class="fa-solid fa-rotate text-[11px]"></i> 새로고침
+                    </button>
+                    <button type="button" onclick="closeCacheModal()" class="w-8 h-8 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white cursor-pointer">
+                        <i class="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-5 overflow-y-auto space-y-4 bg-slate-50/70 text-xs">
+                <!-- 사용 여부 토글 -->
+                <div class="bg-white p-4 rounded-xl border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <div class="font-bold text-slate-900 text-sm">캐시 사용</div>
+                        <div class="text-slate-500 mt-0.5">OFF로 두면 캐시를 조회하지 않고 매번 임베딩 API를 호출합니다. 실행 로그에 <code>use_embedding_cache</code>로 기록됩니다.</div>
+                    </div>
+                    <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                        <input type="checkbox" id="cacheEnabledToggle" class="w-4 h-4 accent-emerald-600" onchange="toggleEmbeddingCache(this.checked)">
+                        <span id="cacheEnabledLabel" class="font-bold text-slate-700">-</span>
+                    </label>
+                </div>
+
+                <!-- KPI -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div class="bg-white p-3 rounded-xl border border-slate-200">
+                        <div class="text-slate-500 font-semibold">저장된 벡터</div>
+                        <div class="text-xl font-black text-slate-900 mt-1" id="cacheTotal">0</div>
+                        <div class="text-[10.5px] text-slate-400" id="cacheSize">0 KB</div>
+                    </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200">
+                        <div class="text-slate-500 font-semibold">현재 DB 청크 보유율</div>
+                        <div class="text-xl font-black text-emerald-700 mt-1" id="cacheCoverage">-</div>
+                        <div class="text-[10.5px] text-slate-400" id="cacheCoverageDetail">-</div>
+                    </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200">
+                        <div class="text-slate-500 font-semibold">질문 임베딩 적중률</div>
+                        <div class="text-xl font-black text-blue-700 mt-1" id="cacheQueryRate">-</div>
+                        <div class="text-[10.5px] text-slate-400" id="cacheQueryDetail">서버 기동 이후</div>
+                    </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200">
+                        <div class="text-slate-500 font-semibold">인덱싱 임베딩 적중률</div>
+                        <div class="text-xl font-black text-indigo-700 mt-1" id="cacheIndexRate">-</div>
+                        <div class="text-[10.5px] text-slate-400" id="cacheIndexDetail">서버 기동 이후</div>
+                    </div>
+                </div>
+
+                <!-- 모델별 표 -->
+                <div class="bg-white rounded-xl border border-slate-200 overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="bg-slate-50 text-slate-500">
+                            <tr>
+                                <th class="py-2 px-3 font-semibold">임베딩 모델</th>
+                                <th class="py-2 px-3 font-semibold text-right">벡터 수</th>
+                                <th class="py-2 px-3 font-semibold text-right">차원</th>
+                                <th class="py-2 px-3 font-semibold text-right">용량</th>
+                                <th class="py-2 px-3 font-semibold">최근 저장</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cacheModelTableBody" class="divide-y divide-slate-100"></tbody>
+                    </table>
+                </div>
+                <div class="text-[10.5px] text-slate-500" id="cacheOtherNote"></div>
+
+                <div class="flex justify-end">
+                    <button type="button" onclick="clearEmbeddingCache()" class="text-rose-600 hover:bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg cursor-pointer">
+                        <i class="fa-solid fa-trash-can mr-1"></i> 캐시 비우기
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 토큰 카운터 & 모델별 과금 대시보드 모달 -->
+    <!-- ===================================================================== -->
+    <div id="costDashboardModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in duration-200">
+            
+            <!-- 모달 상단 헤더 -->
+            <div class="px-6 py-4 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white flex flex-wrap items-center justify-between gap-3 border-b border-slate-700">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-400 flex items-center justify-center text-white shadow-md">
+                        <i class="fa-solid fa-chart-pie text-lg"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="text-base font-bold text-white">토큰 카운터 & 모델별 과금 대시보드</h3>
+                            <span class="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded-full font-semibold">GCP Model Garden & Vertex AI 기준</span>
+                        </div>
+                        <p class="text-xs text-slate-300">Google Cloud 공식 종량제 요금표 실시간 매핑 및 세션별 누적 비용 분석</p>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="refreshCostDashboard()" 
+                            class="px-3 py-1.5 text-xs bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition flex items-center gap-1.5 border border-white/10 shadow-xs cursor-pointer">
+                        <i class="fa-solid fa-rotate text-[11px]"></i> 새로고침
+                    </button>
+                    <button type="button" onclick="resetCostDashboard()" 
+                            class="px-3 py-1.5 text-xs bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-400/30 rounded-lg font-medium transition flex items-center gap-1.5 cursor-pointer">
+                        <i class="fa-solid fa-arrow-rotate-left text-[11px]"></i> 누적 초기화
+                    </button>
+                    <button type="button" onclick="closeCostDashboardModal()" 
+                            class="w-8 h-8 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer">
+                        <i class="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 모달 본문 (스크롤 영역) -->
+            <div class="p-6 flex-1 overflow-y-auto space-y-6 bg-slate-50/70">
+                
+                <!-- 4개 핵심 KPI 요약 카드 그리드 -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <!-- KPI 1: 총 질의 횟수 -->
+                    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+                        <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+                            <span class="font-semibold">누적 질의 횟수</span>
+                            <span class="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center text-xs">
+                                <i class="fa-solid fa-comments"></i>
+                            </span>
+                        </div>
+                        <div class="text-2xl font-black text-slate-900" id="dashTotalQueries">0<span class="text-xs font-normal text-slate-500 ml-1">회</span></div>
+                        <div class="text-[11px] text-slate-400 mt-1">세션 동안 실행된 RAG Q&A</div>
+                    </div>
+
+                    <!-- KPI 2: 총 토큰 사용량 -->
+                    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+                        <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+                            <span class="font-semibold">누적 토큰 사용량</span>
+                            <span class="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center text-xs">
+                                <i class="fa-solid fa-microchip"></i>
+                            </span>
+                        </div>
+                        <div class="text-2xl font-black text-emerald-700 font-mono" id="dashTotalTokens">0<span class="text-xs font-normal text-slate-500 ml-1">tok</span></div>
+                        <div class="text-[11px] text-slate-500 mt-1 flex items-center justify-between">
+                            <span>입력: <b id="dashInputTokens" class="font-mono text-slate-700">0</b></span>
+                            <span>출력: <b id="dashOutputTokens" class="font-mono text-slate-700">0</b></span>
+                        </div>
+                    </div>
+
+                    <!-- KPI 3: 총 예상 과금액 (USD / KRW) -->
+                    <div class="bg-gradient-to-br from-amber-500 to-orange-500 text-white p-4 rounded-xl shadow-md">
+                        <div class="flex items-center justify-between text-xs text-amber-100 mb-1">
+                            <span class="font-bold">총 예상 과금액</span>
+                            <span class="w-7 h-7 rounded-lg bg-white/20 text-white flex items-center justify-center text-xs">
+                                <i class="fa-solid fa-dollar-sign"></i>
+                            </span>
+                        </div>
+                        <div class="text-2xl font-black tracking-tight font-mono" id="dashTotalUsd">$0.000000</div>
+                        <div class="text-xs font-bold text-amber-100 mt-1 flex items-center justify-between">
+                            <span>약 <span id="dashTotalKrw" class="font-mono text-white text-sm">0</span> 원</span>
+                            <span class="text-[10px] bg-black/20 px-1.5 py-0.5 rounded font-normal">기준환율: ₩1,400/$</span>
+                        </div>
+                    </div>
+
+                    <!-- KPI 4: 최고 가성비 모델 -->
+                    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+                        <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+                            <span class="font-semibold">최적 가성비 모델</span>
+                            <span class="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center text-xs">
+                                <i class="fa-solid fa-award"></i>
+                            </span>
+                        </div>
+                        <div class="text-base font-bold text-purple-900 truncate" id="dashCheapestModel">-</div>
+                        <div class="text-[11px] text-slate-500 mt-1">사용된 모델 중 최저 토큰단가</div>
+                    </div>
+                </div>
+
+                <!-- 공식 가격 안내 배너 및 출처 링크 -->
+                <div class="bg-blue-50/70 border border-blue-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div class="flex items-center gap-2">
+                        <span class="w-6 h-6 rounded-md bg-blue-600 text-white flex items-center justify-center text-xs">
+                            <i class="fa-solid fa-link"></i>
+                        </span>
+                        <div>
+                            <span class="font-bold text-blue-950">Google Cloud 공식 종량제(Pay-as-you-go) 요금 기준 연동</span>
+                            <span class="text-slate-500 text-[11px] ml-1.5">100만(1M) 토큰 단위 공식 과금 단가</span>
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 text-[11px]">
+                        <a href="https://cloud.google.com/model-garden/pricing#cost-of-building-and-deploying-ai-models-in-agent-platform" target="_blank" class="text-blue-700 hover:text-blue-900 bg-white border border-blue-200 px-2.5 py-1 rounded-lg transition font-medium flex items-center gap-1 shadow-2xs">
+                            <i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> Model Garden Pricing
+                        </a>
+                        <a href="https://cloud.google.com/model-garden/partner-models/pricing" target="_blank" class="text-blue-700 hover:text-blue-900 bg-white border border-blue-200 px-2.5 py-1 rounded-lg transition font-medium flex items-center gap-1 shadow-2xs">
+                            <i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> Partner Models Pricing
+                        </a>
+                        <a href="https://cloud.google.com/vertex-ai/generative-ai/pricing" target="_blank" class="text-blue-700 hover:text-blue-900 bg-white border border-blue-200 px-2.5 py-1 rounded-lg transition font-medium flex items-center gap-1 shadow-2xs">
+                            <i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> Vertex AI Pricing
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 모델별 단가 및 누적 사용량 / 과금 테이블 -->
+                <div class="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+                    <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+                        <h4 class="text-xs font-bold text-slate-800 flex items-center gap-2">
+                            <i class="fa-solid fa-table-list text-amber-600"></i>
+                            RAG 지원 모델별 공식 단가 및 세션 누적 사용량
+                        </h4>
+                        <span class="text-[11px] text-slate-400">단위: 1M Tokens (100만 토큰)</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr>
+                                    <th class="py-2.5 px-4">모델명</th>
+                                    <th class="py-2.5 px-3">제공사 / 배포 유형</th>
+                                    <th class="py-2.5 px-3 text-right">입력 단가 (/1M)</th>
+                                    <th class="py-2.5 px-3 text-right">출력 단가 (/1M)</th>
+                                    <th class="py-2.5 px-3 text-center">질의수</th>
+                                    <th class="py-2.5 px-3 text-right">입력 토큰</th>
+                                    <th class="py-2.5 px-3 text-right">출력 토큰</th>
+                                    <th class="py-2.5 px-3 text-right font-bold text-slate-800">총 토큰</th>
+                                    <th class="py-2.5 px-4 text-right font-bold text-amber-700">누적 금액 (USD / KRW)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dashModelTableBody" class="divide-y divide-slate-100 text-slate-700 font-sans">
+                                <!-- JS 동적 렌더링 -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 최근 질의 히스토리 로그 테이블 -->
+                <div class="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+                    <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+                        <h4 class="text-xs font-bold text-slate-800 flex items-center gap-2">
+                            <i class="fa-solid fa-clock-rotate-left text-slate-600"></i>
+                            최근 질의별 토큰 소모 & 발생 요금 내역
+                        </h4>
+                        <span class="text-[11px] text-slate-400">최근 30건 실시간 기록</span>
+                    </div>
+                    <div class="overflow-x-auto max-h-[260px]">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0">
+                                <tr>
+                                    <th class="py-2 px-4">시각</th>
+                                    <th class="py-2 px-3">사용 모델</th>
+                                    <th class="py-2 px-3">질의 내용</th>
+                                    <th class="py-2 px-3 text-right">입력 토큰</th>
+                                    <th class="py-2 px-3 text-right">출력 토큰</th>
+                                    <th class="py-2 px-3 text-right">총 토큰</th>
+                                    <th class="py-2 px-3 text-right font-semibold text-amber-700">과금액 (USD)</th>
+                                    <th class="py-2 px-4 text-right font-semibold text-emerald-700">원화 환산</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dashHistoryTableBody" class="divide-y divide-slate-100 text-slate-700">
+                                <tr>
+                                    <td colspan="8" class="py-6 text-center text-slate-400 text-xs">
+                                        아직 실행된 질의응답 내역이 없습니다. 질문을 입력하면 실시간으로 기록됩니다.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- 모달 푸터 -->
+            <div class="px-6 py-3.5 bg-white border-t border-slate-200 flex flex-wrap items-center justify-between text-xs text-slate-500 gap-3">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-circle-info text-amber-500"></i>
+                    <span>LangChain `usage_metadata` 기반 실제 API 사용 토큰 기준 산출 (로컬 Ollama는 100% 무료).</span>
+                </div>
+                <button type="button" onclick="closeCostDashboardModal()" class="px-5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium transition cursor-pointer">
+                    닫기
+                </button>
+            </div>
+
+        </div>
+    </div>
+
     <script>
         // 전역 문서 페이지 상태
         let currentDocData = {
@@ -1061,6 +1596,8 @@ async def serve_ui():
                 if (data.total_chunks_in_db > 0) {
                     await loadDocumentPages();
                 }
+                await updateCostBadge();
+                await updateCacheBadge();
             } catch (e) {
                 console.error(e);
             }
@@ -1405,8 +1942,14 @@ ${escapeHtml(c.content)}
         window.addEventListener('keydown', (e) => {
             const pModal = document.getElementById('pageViewerModal');
             const cModal = document.getElementById('chunksViewerModal');
+            const costModal = document.getElementById('costDashboardModal');
 
             if (e.key === 'Escape') {
+                if (costModal && !costModal.classList.contains('hidden')) {
+                    e.preventDefault();
+                    closeCostDashboardModal();
+                    return;
+                }
                 if (pModal && !pModal.classList.contains('hidden')) {
                     e.preventDefault();
                     closePageModal();
@@ -2144,22 +2687,59 @@ ${escapeHtml(c.content)}
                 document.getElementById('timeB3').innerText = `${data.step_b3_prompt.elapsed}s`;
 
                 // B4 출력 및 최종 답변 업데이트
-                const isGemma = data.step_b4_generation.model.toLowerCase().includes('gemma');
-                const modelBadge = isGemma
-                    ? `<span class="bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded text-[10px] font-bold">🦙 ${data.step_b4_generation.model} (Local)</span>`
-                    : `<span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded text-[10px] font-bold">💎 ${data.step_b4_generation.model} (Cloud)</span>`;
+                const mLower = data.step_b4_generation.model.toLowerCase();
+                let modelBadge = '';
+                if (mLower.includes('deepseek')) {
+                    modelBadge = `<span class="bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded text-[10px] font-bold">🐳 ${data.step_b4_generation.model} (MaaS)</span>`;
+                } else if (mLower.includes('haiku') || mLower.includes('claude')) {
+                    modelBadge = `<span class="bg-orange-100 text-orange-800 px-1.5 py-0.5 rounded text-[10px] font-bold">🎭 ${data.step_b4_generation.model} (Vertex)</span>`;
+                } else if (mLower.includes('3.5-flash-lite') || mLower.includes('3.5-lite')) {
+                    modelBadge = `<span class="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded text-[10px] font-bold">⚡ ${data.step_b4_generation.model} (Vertex)</span>`;
+                } else if (mLower.includes('26b')) {
+                    modelBadge = `<span class="bg-indigo-100 text-indigo-800 px-1.5 py-0.5 rounded text-[10px] font-bold">💎 ${data.step_b4_generation.model} (MaaS)</span>`;
+                } else if (mLower.includes('gemma') || mLower.includes('ollama')) {
+                    modelBadge = `<span class="bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded text-[10px] font-bold">🦙 ${data.step_b4_generation.model} (Local)</span>`;
+                } else {
+                    modelBadge = `<span class="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded text-[10px] font-bold">✨ ${data.step_b4_generation.model} (Cloud)</span>`;
+                }
+
+                let usageHtml = '';
+                let answerCostSummary = '';
+                if (data.step_b4_generation.usage) {
+                    const u = data.step_b4_generation.usage;
+                    const usdStr = u.cost_usd > 0 ? `$${u.cost_usd.toFixed(6)}` : '0원 (로컬)';
+                    const krwStr = u.cost_krw > 0 ? `약 ${u.cost_krw.toFixed(2)}원` : '무료';
+                    usageHtml = `
+                        <div class="mt-2 pt-1.5 border-t border-slate-100 space-y-0.5 text-[10.5px]">
+                            <div class="flex items-center justify-between font-mono">
+                                <span class="text-slate-500">소모 토큰:</span>
+                                <span class="font-bold text-slate-800">in: ${u.input_tokens.toLocaleString()} / out: ${u.output_tokens.toLocaleString()}</span>
+                            </div>
+                            <div class="flex items-center justify-between font-mono">
+                                <span class="text-slate-500">예상 과금:</span>
+                                <span class="font-bold text-amber-700">${usdStr} <span class="text-slate-400 font-normal text-[9.5px]">(${krwStr})</span></span>
+                            </div>
+                        </div>
+                    `;
+                    answerCostSummary = ` · 토큰: ${u.total_tokens.toLocaleString()} tok (in ${u.input_tokens} / out ${u.output_tokens}) · 과금: ${usdStr} (${krwStr})`;
+                }
 
                 document.getElementById('outputB4').innerHTML = `
                     <div class="flex items-center gap-1 mb-1">모델: ${modelBadge}</div>
                     <div>답변 길이: <b>${data.step_b4_generation.answer_len}자</b></div>
                     <div class="text-[10px] text-slate-400">생성 시간: ${data.step_b4_generation.latency}초</div>
+                    ${usageHtml}
                 `;
                 document.getElementById('badgeB4').className = 'text-[10px] px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-medium';
                 document.getElementById('badgeB4').innerText = '완료';
                 document.getElementById('timeB4').innerText = `${data.step_b4_generation.latency}s`;
 
                 document.getElementById('finalAnswerBox').innerText = data.answer;
-                document.getElementById('answerLatency').innerText = `사용 모델: ${data.step_b4_generation.model} · 응답 소요 시간: ${data.step_b4_generation.latency}초`;
+                document.getElementById('answerLatency').innerText = `사용 모델: ${data.step_b4_generation.model} · 응답 소요 시간: ${data.step_b4_generation.latency}초${answerCostSummary}`;
+
+                // 상단 대시보드 뱃지 실시간 갱신
+                await updateCostBadge();
+                await updateCacheBadge();
 
             } catch (err) {
                 alert('에러 발생: ' + err.message);
@@ -2171,6 +2751,427 @@ ${escapeHtml(c.content)}
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> 질문하기';
+            }
+        }
+
+        // =====================================================================
+        // 토큰 카운터 & 모델별 과금 대시보드 함수
+        // =====================================================================
+        let currentCostSummary = null;
+
+        async function updateCostBadge() {
+            try {
+                const res = await fetch('/api/cost-dashboard');
+                const data = await res.json();
+                currentCostSummary = data;
+                const badge = document.getElementById('headerCostBadge');
+                if (badge) {
+                    badge.innerText = `$${data.total_cost_usd.toFixed(4)} (약 ${Math.round(data.total_cost_krw).toLocaleString()}원)`;
+                }
+            } catch (e) {
+                console.error('과금 통계 로드 실패:', e);
+            }
+        }
+
+        async function refreshCostDashboard() {
+            try {
+                const res = await fetch('/api/cost-dashboard');
+                const data = await res.json();
+                currentCostSummary = data;
+                renderCostDashboard(data);
+                updateCostBadge();
+            } catch (e) {
+                console.error('대시보드 갱신 실패:', e);
+            }
+        }
+
+        function renderCostDashboard(data) {
+            // KPI 카드 업데이트
+            document.getElementById('dashTotalQueries').innerHTML = `${data.total_queries}<span class="text-xs font-normal text-slate-500 ml-1">회</span>`;
+            document.getElementById('dashTotalTokens').innerHTML = `${data.total_tokens.toLocaleString()}<span class="text-xs font-normal text-slate-500 ml-1">tok</span>`;
+            document.getElementById('dashInputTokens').innerText = data.total_input_tokens.toLocaleString();
+            document.getElementById('dashOutputTokens').innerText = data.total_output_tokens.toLocaleString();
+            document.getElementById('dashTotalUsd').innerText = `$${data.total_cost_usd.toFixed(6)}`;
+            document.getElementById('dashTotalKrw').innerText = Math.round(data.total_cost_krw).toLocaleString();
+            document.getElementById('dashCheapestModel').innerText = data.cheapest_model || '-';
+
+            // 모델별 단가 및 누적 현황 테이블 렌더링
+            const tbody = document.getElementById('dashModelTableBody');
+            if (tbody && data.models) {
+                let html = '';
+                data.models.forEach(m => {
+                    const isUsed = m.query_count > 0 || m.aux_calls > 0;
+                    const rowBg = isUsed ? 'bg-amber-50/40 hover:bg-amber-50/60 font-medium' : 'hover:bg-slate-50/80';
+                    const activeBadge = isUsed 
+                        ? `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>` 
+                        : `<span class="inline-block w-2 h-2 rounded-full bg-slate-300 mr-1.5"></span>`;
+                    
+                    const usdDisplay = m.cost_usd > 0 ? `$${m.cost_usd.toFixed(6)}` : (m.input_price_per_m === 0 ? '무료 (Free)' : '$0.000000');
+                    const krwDisplay = m.cost_krw > 0 ? `약 ${m.cost_krw.toFixed(2)}원` : (m.input_price_per_m === 0 ? '0원' : '0원');
+
+                    html += `
+                        <tr class="${rowBg} transition">
+                            <td class="py-3 px-4">
+                                <div class="flex items-center">
+                                    ${activeBadge}
+                                    <span class="font-bold text-slate-900">${m.display_name}</span>
+                                </div>
+                                <div class="text-[10px] text-slate-400 mt-0.5 truncate max-w-[200px]">${m.description || ''}</div>
+                            </td>
+                            <td class="py-3 px-3">
+                                <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[10px] font-semibold">${m.deployment}</span>
+                                <div class="text-[10px] text-slate-400 mt-0.5">${m.provider}</div>
+                            </td>
+                            <td class="py-3 px-3 text-right font-mono text-slate-600">
+                                ${m.input_price_per_m > 0 ? `$${m.input_price_per_m.toFixed(2)}` : '<span class="text-emerald-600 font-bold">무료</span>'}
+                            </td>
+                            <td class="py-3 px-3 text-right font-mono text-slate-600">
+                                ${m.output_price_per_m > 0 ? `$${m.output_price_per_m.toFixed(2)}` : '<span class="text-emerald-600 font-bold">무료</span>'}
+                            </td>
+                            <td class="py-3 px-3 text-center">
+                                <span class="px-2 py-0.5 rounded-full text-[11px] font-bold ${m.query_count > 0 ? 'bg-amber-100 text-amber-800' : 'text-slate-400'}">${m.query_count}회</span>
+                                ${m.aux_calls > 0 ? `<div class="text-[10px] text-slate-500 mt-0.5" title="질의 확장·리랭킹·임베딩 등 보조 호출">+보조 ${m.aux_calls}회</div>` : ''}
+                            </td>
+                            <td class="py-3 px-3 text-right font-mono text-slate-600">${m.input_tokens.toLocaleString()}</td>
+                            <td class="py-3 px-3 text-right font-mono text-slate-600">${m.output_tokens.toLocaleString()}</td>
+                            <td class="py-3 px-3 text-right font-mono font-bold text-slate-800">${m.total_tokens.toLocaleString()}</td>
+                            <td class="py-3 px-4 text-right">
+                                <div class="font-mono font-bold ${m.cost_usd > 0 ? 'text-amber-800' : 'text-slate-400'}">${usdDisplay}</div>
+                                <div class="text-[10.5px] text-slate-500 font-mono">${krwDisplay}</div>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+            }
+
+            // 최근 질의 히스토리 테이블 렌더링
+            const hbody = document.getElementById('dashHistoryTableBody');
+            if (hbody) {
+                if (!data.recent_history || data.recent_history.length === 0) {
+                    hbody.innerHTML = `
+                        <tr>
+                            <td colspan="8" class="py-6 text-center text-slate-400 text-xs">
+                                아직 실행된 질의응답 내역이 없습니다. 질문을 입력하면 실시간으로 기록됩니다.
+                            </td>
+                        </tr>
+                    `;
+                } else {
+                    let hHtml = '';
+                    data.recent_history.forEach(item => {
+                        hHtml += `
+                            <tr class="hover:bg-slate-50 transition">
+                                <td class="py-2.5 px-4 font-mono text-[11px] text-slate-500">${item.timestamp}</td>
+                                <td class="py-2.5 px-3 font-semibold text-slate-800 text-[11px]">${item.display_name}</td>
+                                <td class="py-2.5 px-3 text-slate-600 truncate max-w-[220px]" title="${escapeHtml(item.query_preview)}">${escapeHtml(item.query_preview)}</td>
+                                <td class="py-2.5 px-3 text-right font-mono text-[11px] text-slate-600">${item.input_tokens.toLocaleString()}</td>
+                                <td class="py-2.5 px-3 text-right font-mono text-[11px] text-slate-600">${item.output_tokens.toLocaleString()}</td>
+                                <td class="py-2.5 px-3 text-right font-mono font-bold text-[11px] text-slate-800">${item.total_tokens.toLocaleString()}</td>
+                                <td class="py-2.5 px-3 text-right font-mono font-bold text-amber-700 text-[11px]">$${item.cost_usd.toFixed(6)}</td>
+                                <td class="py-2.5 px-4 text-right font-mono text-emerald-700 font-medium text-[11px]">약 ${item.cost_krw.toFixed(2)}원</td>
+                            </tr>
+                        `;
+                    });
+                    hbody.innerHTML = hHtml;
+                }
+            }
+        }
+
+        async function openCostDashboardModal() {
+            const modal = document.getElementById('costDashboardModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            }
+            await refreshCostDashboard();
+        }
+
+        function closeCostDashboardModal() {
+            const modal = document.getElementById('costDashboardModal');
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+        }
+
+        // =====================================================================
+        // 실행 로그 (인덱싱 / 질문)
+        // =====================================================================
+        let runLogKind = 'query';
+        let runLogRecords = [];
+
+        function onOff(v) {
+            if (v === true) return '<span class="text-emerald-700 font-bold">ON</span>';
+            if (v === false) return '<span class="text-slate-400">OFF</span>';
+            return '<span class="text-slate-300">-</span>';
+        }
+
+        function fmtNum(v, digits) {
+            return (v === null || v === undefined) ? '-' : Number(v).toFixed(digits);
+        }
+
+        function statusBadge(s, reason) {
+            const cls = s === 'success' ? 'bg-emerald-100 text-emerald-700'
+                      : s === 'skipped' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700';
+            const label = s === 'success' ? '성공' : s === 'skipped' ? '스킵' : '오류';
+            return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${cls}" title="${escapeHtml(reason || '')}">${label}</span>`;
+        }
+
+        function shortTime(ts) {
+            return (ts || '').replace('T', ' ').slice(5, 19);
+        }
+
+        function renderRunLogSummary(rows) {
+            const body = document.getElementById('runLogSummaryBody');
+            if (!rows || rows.length === 0) {
+                body.innerHTML = `<tr><td colspan="11" class="py-4 text-center text-slate-400">성공한 질문 기록이 없습니다.</td></tr>`;
+                return;
+            }
+            body.innerHTML = rows.map((r, i) => `
+                <tr class="${i === 0 && r.avg_keyword_recall !== null ? 'bg-amber-50/60 font-medium' : ''}">
+                    <td class="py-2 px-3 font-semibold text-slate-800">${escapeHtml(r.llm_model || '-')}</td>
+                    <td class="py-2 px-3 text-center font-mono">${r.top_k ?? '-'}</td>
+                    <td class="py-2 px-3 text-center">${onOff(r.use_query_expansion)}</td>
+                    <td class="py-2 px-3 text-center">${onOff(r.use_rerank)}</td>
+                    <td class="py-2 px-3 text-center">${onOff(r.use_embedding_cache)}</td>
+                    <td class="py-2 px-3 text-center font-mono">${r.chunk_size ?? '-'}</td>
+                    <td class="py-2 px-3 text-right font-mono">${r.runs} (${r.eval_runs})</td>
+                    <td class="py-2 px-3 text-right font-mono">${fmtNum(r.avg_cost_krw, 2)}원</td>
+                    <td class="py-2 px-3 text-right font-mono">${fmtNum(r.avg_wall_sec, 1)}s</td>
+                    <td class="py-2 px-3 text-right font-mono">${pct(r.page_hit_rate)}</td>
+                    <td class="py-2 px-3 text-right font-mono font-bold">${pct(r.avg_keyword_recall)}</td>
+                </tr>`).join('');
+        }
+
+        function renderRunLogTable() {
+            const head = document.getElementById('runLogHead');
+            const body = document.getElementById('runLogBody');
+            const th = (t, right) => `<th class="py-2 px-3 font-semibold ${right ? 'text-right' : ''}">${t}</th>`;
+
+            if (runLogKind === 'query') {
+                head.innerHTML = '<tr>' + ['시간', '상태', '질문', 'LLM', 'top_k', '확장', '리랭킹', '캐시'].map(t => th(t)).join('')
+                    + ['비용', '소요', '페이지 적중', '키워드 재현율'].map(t => th(t, true)).join('') + '</tr>';
+            } else {
+                head.innerHTML = '<tr>' + ['시간', '상태', '파일', 'OCR 모델', '임베딩 모델', '캐시', 'chunk (overlap)'].map(t => th(t)).join('')
+                    + ['OCR/전체 쪽', '청크 수', '캐시 적중/미스', '비용', '소요'].map(t => th(t, true)).join('') + '</tr>';
+            }
+
+            if (runLogRecords.length === 0) {
+                body.innerHTML = `<tr><td colspan="12" class="py-6 text-center text-slate-400">아직 기록이 없습니다. ${runLogKind === 'query' ? '질문하기' : '인덱싱 시작'}을 실행하면 여기에 쌓입니다.</td></tr>`;
+                return;
+            }
+
+            body.innerHTML = runLogRecords.map((r, i) => {
+                const s = r.settings || {};
+                const u = r.usage || {};
+                const t = r.timings_sec || {};
+                let cells;
+                if (runLogKind === 'query') {
+                    const e = r.eval;
+                    cells = `
+                        <td class="py-2 px-3 max-w-[280px] truncate" title="${escapeHtml(r.question || '')}">${escapeHtml(r.question || '')}</td>
+                        <td class="py-2 px-3 font-semibold">${escapeHtml(s.llm_model || '-')}</td>
+                        <td class="py-2 px-3 text-center font-mono">${s.top_k ?? '-'}</td>
+                        <td class="py-2 px-3 text-center">${onOff(s.use_query_expansion)}</td>
+                        <td class="py-2 px-3 text-center">${onOff(s.use_rerank)}</td>
+                        <td class="py-2 px-3 text-center">${onOff(s.use_embedding_cache)}</td>
+                        <td class="py-2 px-3 text-right font-mono">${fmtNum(u.total_cost_krw, 2)}원</td>
+                        <td class="py-2 px-3 text-right font-mono">${fmtNum(t.wall, 1)}s</td>
+                        <td class="py-2 px-3 text-right">${e ? (e.retrieval_page_hit ? '<span class="text-emerald-700 font-bold">O</span>' : '<span class="text-rose-600 font-bold">X</span>') : '<span class="text-slate-300" title="평가셋 질문이 아님">-</span>'}</td>
+                        <td class="py-2 px-3 text-right font-mono">${e ? `${pct(e.keyword_recall)} <span class="text-slate-400">(${e.keyword_hits.length}/${e.keyword_total})</span>` : '<span class="text-slate-300">-</span>'}</td>`;
+                } else {
+                    const p = r.pages || {};
+                    const c = r.chunks || {};
+                    const em = r.embedding || {};
+                    cells = `
+                        <td class="py-2 px-3 font-semibold max-w-[200px] truncate" title="${escapeHtml((r.file || {}).name || '')}">${escapeHtml((r.file || {}).name || '-')}</td>
+                        <td class="py-2 px-3">${escapeHtml(s.ocr_model || '-')}${s.ocr_prompt_is_default === false ? ' <span class="text-[10px] text-amber-600" title="사용자 지정 OCR 프롬프트">*</span>' : ''}</td>
+                        <td class="py-2 px-3">${escapeHtml(s.embedding_model || '-')}</td>
+                        <td class="py-2 px-3 text-center">${onOff(s.use_embedding_cache)}</td>
+                        <td class="py-2 px-3 font-mono">${s.chunk_size ?? '-'} (${s.chunk_overlap ?? '-'})</td>
+                        <td class="py-2 px-3 text-right font-mono">${p.ocr_pages ?? '-'} / ${p.pdf_total_pages ?? '-'}</td>
+                        <td class="py-2 px-3 text-right font-mono">${c.chunk_count ?? '-'}</td>
+                        <td class="py-2 px-3 text-right font-mono">${em.cache_hit_count ?? '-'} / ${em.cache_miss_count ?? '-'}</td>
+                        <td class="py-2 px-3 text-right font-mono">${fmtNum(u.total_cost_krw, 2)}원</td>
+                        <td class="py-2 px-3 text-right font-mono">${fmtNum(t.wall, 1)}s</td>`;
+                }
+                return `
+                    <tr class="hover:bg-slate-50 cursor-pointer" onclick="toggleRunLogDetail(${i})">
+                        <td class="py-2 px-3 font-mono text-slate-500">${shortTime(r.timestamp)}</td>
+                        <td class="py-2 px-3">${statusBadge(r.status, r.error || r.skip_reason)}</td>
+                        ${cells}
+                    </tr>
+                    <tr id="runLogDetail${i}" class="hidden">
+                        <td colspan="12" class="p-0">
+                            <pre class="bg-slate-900 text-slate-100 text-[11px] p-4 max-h-[420px] overflow-auto whitespace-pre-wrap">${escapeHtml(JSON.stringify(r, null, 2))}</pre>
+                        </td>
+                    </tr>`;
+            }).join('');
+        }
+
+        function toggleRunLogDetail(i) {
+            document.getElementById('runLogDetail' + i).classList.toggle('hidden');
+        }
+
+        function switchRunLogTab(kind) {
+            runLogKind = kind;
+            const active = 'px-3 py-1.5 rounded-md cursor-pointer bg-white text-slate-900 font-bold';
+            const idle = 'px-3 py-1.5 rounded-md cursor-pointer text-slate-300 hover:text-white';
+            document.getElementById('runLogTabQuery').className = kind === 'query' ? active : idle;
+            document.getElementById('runLogTabIndex').className = kind === 'index' ? active : idle;
+            document.getElementById('runLogSummaryBox').classList.toggle('hidden', kind !== 'query');
+            document.getElementById('runLogDownload').href = `/api/run-logs/download?kind=${kind}`;
+            refreshRunLogs();
+        }
+
+        async function refreshRunLogs() {
+            try {
+                const res = await fetch(`/api/run-logs?kind=${runLogKind}`);
+                const data = await res.json();
+                runLogRecords = data.records || [];
+                document.getElementById('runLogPath').innerText = `저장 위치: ${data.path}`;
+                document.getElementById('runLogCount').innerText = `(${data.count}건, 최신순)`;
+                if (runLogKind === 'query') renderRunLogSummary(data.summary);
+                renderRunLogTable();
+            } catch (e) {
+                console.error('실행 로그 로드 실패:', e);
+            }
+        }
+
+        function openRunLogModal() {
+            const modal = document.getElementById('runLogModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            switchRunLogTab(runLogKind);
+        }
+
+        function closeRunLogModal() {
+            const modal = document.getElementById('runLogModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        // =====================================================================
+        // 임베딩 캐시 현황
+        // =====================================================================
+        function renderCacheBadge(data) {
+            const state = document.getElementById('cacheBadgeState');
+            if (!state) return;
+            state.innerText = data.enabled ? 'ON' : 'OFF';
+            state.className = 'px-1.5 py-0.5 rounded text-[10px] font-bold ' +
+                (data.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
+            document.getElementById('cacheBadgeCount').innerText = data.total_cached_embeddings.toLocaleString();
+        }
+
+        function pct(v) {
+            return (v === null || v === undefined) ? '-' : `${(v * 100).toFixed(1)}%`;
+        }
+
+        function renderCacheModal(data) {
+            renderCacheBadge(data);
+            const toggle = document.getElementById('cacheEnabledToggle');
+            toggle.checked = data.enabled;
+            document.getElementById('cacheEnabledLabel').innerText = data.enabled ? 'ON (사용 중)' : 'OFF (매번 API 호출)';
+            document.getElementById('cacheTotal').innerText = data.total_cached_embeddings.toLocaleString();
+            document.getElementById('cacheSize').innerText = `${data.total_size_kb.toLocaleString()} KB`;
+
+            const covRate = data.db_unique_chunks ? data.db_chunks_covered / data.db_unique_chunks : null;
+            document.getElementById('cacheCoverage').innerText = pct(covRate);
+            document.getElementById('cacheCoverageDetail').innerText =
+                `${data.db_chunks_covered.toLocaleString()} / ${data.db_unique_chunks.toLocaleString()} 청크 (${data.embedding_model})`;
+
+            const s = data.session;
+            document.getElementById('cacheQueryRate').innerText = pct(s.query_hit_rate);
+            document.getElementById('cacheQueryDetail').innerText = `적중 ${s.query_hit} · 미스 ${s.query_miss} (서버 기동 이후)`;
+            document.getElementById('cacheIndexRate').innerText = pct(s.index_hit_rate);
+            document.getElementById('cacheIndexDetail').innerText = `적중 ${s.index_hit} · 미스 ${s.index_miss} (서버 기동 이후)`;
+
+            const tbody = document.getElementById('cacheModelTableBody');
+            tbody.innerHTML = data.models.length === 0
+                ? `<tr><td colspan="5" class="py-4 text-center text-slate-400">캐시된 임베딩이 없습니다.</td></tr>`
+                : data.models.map(m => `
+                    <tr class="${m.model_name === data.embedding_model ? 'bg-emerald-50/50 font-medium' : ''}">
+                        <td class="py-2 px-3">${escapeHtml(m.model_name)}${m.model_name === data.embedding_model ? ' <span class="text-[10px] text-emerald-700">(현재)</span>' : ''}</td>
+                        <td class="py-2 px-3 text-right font-mono">${m.count.toLocaleString()}</td>
+                        <td class="py-2 px-3 text-right font-mono">${m.dimension}</td>
+                        <td class="py-2 px-3 text-right font-mono">${m.size_kb.toLocaleString()} KB</td>
+                        <td class="py-2 px-3 font-mono text-slate-500">${m.last_at || '-'}</td>
+                    </tr>`).join('');
+
+            document.getElementById('cacheOtherNote').innerText =
+                `현재 모델 캐시 ${data.current_model_cached.toLocaleString()}개 중 ${data.other_cached.toLocaleString()}개는 현재 DB 청크가 아닌 항목입니다 (질문 임베딩, 다른 chunk_size로 만든 청크 등).`;
+        }
+
+        async function updateCacheBadge() {
+            try {
+                const res = await fetch('/api/embedding-cache');
+                renderCacheBadge(await res.json());
+            } catch (e) {
+                console.error('임베딩 캐시 현황 로드 실패:', e);
+            }
+        }
+
+        async function refreshCacheModal() {
+            try {
+                const res = await fetch('/api/embedding-cache');
+                renderCacheModal(await res.json());
+            } catch (e) {
+                console.error('임베딩 캐시 현황 로드 실패:', e);
+            }
+        }
+
+        async function openCacheModal() {
+            const modal = document.getElementById('cacheModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            await refreshCacheModal();
+        }
+
+        function closeCacheModal() {
+            const modal = document.getElementById('cacheModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        async function toggleEmbeddingCache(enabled) {
+            try {
+                const res = await fetch('/api/embedding-cache/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+                renderCacheModal(await res.json());
+            } catch (e) {
+                alert('캐시 설정 변경 실패: ' + e);
+            }
+        }
+
+        async function clearEmbeddingCache() {
+            if (!confirm('저장된 임베딩 캐시를 모두 삭제하시겠습니까?\\n(벡터 DB의 청크는 유지되며, 이후 같은 텍스트는 임베딩 API를 다시 호출합니다.)')) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/embedding-cache', { method: 'DELETE' });
+                const data = await res.json();
+                renderCacheModal(data);
+                alert(`임베딩 캐시 ${data.deleted.toLocaleString()}개를 삭제했습니다.`);
+            } catch (e) {
+                alert('캐시 비우기 실패: ' + e);
+            }
+        }
+
+        async function resetCostDashboard() {
+            if (!confirm('누적된 모든 토큰 사용량과 과금 통계를 초기화하시겠습니까?')) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/cost-dashboard/reset', { method: 'POST' });
+                const data = await res.json();
+                renderCostDashboard(data.summary);
+                updateCostBadge();
+                alert('토큰 카운터 및 과금 대시보드 통계가 초기화되었습니다.');
+            } catch (e) {
+                alert('초기화 실패: ' + e);
             }
         }
     </script>

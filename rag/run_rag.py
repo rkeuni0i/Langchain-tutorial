@@ -83,8 +83,15 @@ def parse_args():
         "--llm-model",
         type=str,
         default="gemini-3.8-flash",
-        choices=["gemini-3.8-flash", "gemma4:e2b"],
-        help="답변 생성 LLM 모델 (gemini-3.8-flash 또는 gemma4:e2b, 기본값: gemini-3.8-flash)",
+        choices=[
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "deepseek-v4.1-flash",
+            "gemma-4-26b",
+            "claude-haiku-5-5",
+            "gemma4:e2b",
+        ],
+        help="답변 생성 LLM 모델 (기본값: gemini-3.8-flash)",
     )
     parser.add_argument(
         "--ocr-prompt",

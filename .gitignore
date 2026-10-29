@@ -11,6 +11,7 @@ wheels/
 
 # Environment variables
 .env
+.env_*
 
 
 # RAG: 저작권 있는 원본 PDF, 책 전문이 담긴 DB/캐시, 중복·임시 산출물
@@ -25,6 +26,12 @@ rag/제출용_RAG/
 # RAG: 청크 본문(책 내용)이 들어 있는 평가 원본 (스크립트로 재생성 가능)
 rag/eval_metrics_35.json
 rag/eval_refusal_35.json
+
+# RAG: 청크 검색 결과를 덤프한 임시 파일 (책 본문 포함)
+scratch_*.txt
+
+# RAG: 인덱싱/질문 실행 로그 (질문·답변 원문 포함, rag/run_logger.py가 생성)
+rag/logs/
 
 # RAG: 동작하지 않는 옛 평가 스크립트와 결과물 (채점이 코드에 하드코딩됨)
 rag/grade_eval.py

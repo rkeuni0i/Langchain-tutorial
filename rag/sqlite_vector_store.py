@@ -195,6 +195,50 @@ class SQLiteVectorStore:
             models = {r[0]: r[1] for r in cur.fetchall()}
             return {"total_cached_embeddings": total_cached, "models": models}
 
+    def get_cache_overview(self, model_name: str) -> Dict[str, Any]:
+        """웹 UI용 임베딩 캐시 상세 통계: 모델별 건수/용량/기간 + 현재 DB 청크의 캐시 보유율"""
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT model_name, COUNT(*) AS cnt, MAX(dimension) AS dim,
+                       SUM(LENGTH(embedding)) AS bytes,
+                       datetime(MIN(created_at), 'localtime') AS first_at,
+                       datetime(MAX(created_at), 'localtime') AS last_at
+                FROM embedding_cache GROUP BY model_name ORDER BY cnt DESC;
+                """
+            )
+            models = [
+                {
+                    "model_name": r["model_name"],
+                    "count": r["cnt"],
+                    "dimension": r["dim"],
+                    "size_kb": round((r["bytes"] or 0) / 1024, 1),
+                    "first_at": r["first_at"],
+                    "last_at": r["last_at"],
+                }
+                for r in cur.fetchall()
+            ]
+            cur.execute("SELECT text_hash FROM embedding_cache WHERE model_name = ?;", (model_name,))
+            cached_hashes = {r["text_hash"] for r in cur.fetchall()}
+            cur.execute("SELECT content FROM rag_chunks;")
+            chunk_hashes = {
+                hashlib.sha256(re.sub(r"\s+", " ", r["content"].strip()).encode("utf-8")).hexdigest()
+                for r in cur.fetchall()
+            }
+
+        covered = len(chunk_hashes & cached_hashes)
+        return {
+            "total_cached_embeddings": sum(m["count"] for m in models),
+            "total_size_kb": round(sum(m["size_kb"] for m in models), 1),
+            "models": models,
+            "current_model_cached": len(cached_hashes),
+            "db_unique_chunks": len(chunk_hashes),
+            "db_chunks_covered": covered,
+            # 현재 DB 청크가 아닌 항목 = 질문 임베딩 + 이전 설정(chunk_size 등)으로 만든 청크
+            "other_cached": len(cached_hashes) - covered,
+        }
+
     def clear_embedding_cache(self) -> int:
         """임베딩 캐시 전체 비우기"""
         with self._get_connection() as conn:
